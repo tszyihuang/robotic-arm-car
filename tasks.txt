@@ -1,0 +1,56 @@
+[主线]
+arm-calibrate
+straight 0.3
+arm-move 6 0 160 1
+scan-qrcode           # 抬头扫码，结果返回 plan 节点的 qr_data
+home
+turn 87 0.38
+turn -45 0.52
+turn -42 0
+straight 0.7
+calibrate-position
+turn 44 0.24
+turn 44 0
+straight 0.46
+turn -87 0.36
+straight 0.27
+turn -87 0.36
+align
+vision-straight 0.45
+arm-move -90 37 110 62      #移动待机位置（观察顺序）
+抓球任务
+vision-straight 1.76
+straight 0.13
+turn -87 0.43
+vision-straight 0.67
+vision-straight 1.55
+
+
+[抓中间的小球]
+gripper-open
+arm-move -95 133 134 -83
+gripper-close
+arm-move -90 37 110 62
+arm-move 90 82 142 -56
+gripper-open
+arm-home
+
+
+[抓左边的小球]
+
+
+
+[抓右边的小球]
+
+
+[打左边的靶]
+
+[打中间的靶]
+
+[打右边的靶]
+
+[抓左边的物体]
+
+[抓中间的物体]
+
+[抓右边的物体]

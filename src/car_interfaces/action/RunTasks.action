@@ -1,0 +1,15 @@
+# Whole list is checked before sending any hardware goals.
+string tasks
+bool dry_run
+bool keep_going
+float64 gap_s
+---
+bool success
+uint32 completed_steps
+string message
+string details_json
+---
+uint32 step_index
+uint32 total_steps
+string command
+string phase

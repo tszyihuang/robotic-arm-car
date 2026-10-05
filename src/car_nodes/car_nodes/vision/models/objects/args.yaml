@@ -1,0 +1,5 @@
+task: detect
+imgsz: 640
+conf: null
+iou: 0.7
+max_det: 300
