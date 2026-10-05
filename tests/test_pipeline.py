@@ -34,10 +34,11 @@ def imu(stamp, delta=0.0):
 class MissionTests(unittest.TestCase):
     def test_all_shipped_tables_validate(self):
         self.assertEqual(default_task_file(), ROOT / 'tasks.txt')
-        for name in ('tasks.txt', 'task1.txt', 'tasks.track.txt'):
-            self.assertTrue(prepare_tasks((ROOT / name).read_text()))
-        self.assertEqual([s.target for s in prepare_tasks((ROOT / 'tasks.txt').read_text())],
-                         ['arm', 'base', 'arm', 'vision', 'arm'])
+        for table in ROOT.glob('*.txt'):
+            self.assertTrue(prepare_tasks(table.read_text()))
+        main = prepare_tasks((ROOT / 'tasks.txt').read_text())
+        self.assertIn('抓球任务', [s.command for s in main])
+        self.assertNotIn('gripper-open', [s.command for s in main])
 
     def test_invalid_later_step_rejects_complete_mission(self):
         for text in ('straight 0.3\nunknown', 'arm-move 0 0 160 24',
@@ -59,7 +60,8 @@ class MissionTests(unittest.TestCase):
         session = ArmSession(simulate=True)
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                for step in prepare_tasks((ROOT / 'task1.txt').read_text()):
+                for step in prepare_tasks('arm-calibrate\ngripper-open\narm-move -95 133 134 -83\n'
+                                          'gripper-close\narm-move 90 82 142 -56\ngripper-open\narm-home'):
                     self.assertTrue(getattr(session, actions[step.command])(*step.args)['ok'])
             self.assertTrue(session.calibrated)
             self.assertEqual(session._arm.get_joints(), session.config.joint_offsets_deg)

@@ -1,6 +1,8 @@
 """机械臂与夹爪的持久会话，供命令行和 ROS 2 共用。"""
 
 import warnings
+import threading
+import time
 
 from ..common.control import MotionCancelled, check_cancel
 from .config import ArmConfig
@@ -20,6 +22,62 @@ class ArmSession:
         self._arm = None
         self._servo = None
         self._initial_joints = None
+        self._bus = None
+        self._connection_lock = threading.RLock()
+
+    def _ensure_bus(self):
+        with self._connection_lock:
+            if self._bus is None:
+                from .motor import MotorBus, SimulatedBus
+                config = self.config
+                self._bus = (SimulatedBus(config) if self._simulate else MotorBus(
+                    config.port, config.baudrate, config.serial_timeout, latency_ms=config.serial_latency_ms))
+            return self._bus
+
+    def _ensure_servo(self):
+        with self._connection_lock:
+            if self._servo is None and self._arm is not None:
+                self._servo = self._arm._gripper
+            if self._servo is None:
+                from .servo import FeetechSTSServo
+                config = self.config
+                self._servo = FeetechSTSServo(
+                    port=config.gripper_port, baudrate=config.gripper_baudrate,
+                    servo_id=config.gripper_servo_id, speed=config.gripper_speed,
+                    timeout=config.gripper_timeout, simulate=self._simulate,
+                    release_on_close=config.gripper_release_on_close)
+            return self._servo
+
+    def angles(self):
+        """只读反馈；未校准时报告编码器读数，不建立软件零点或发送运动命令。"""
+        motors, servos = {}, {}
+        try:
+            bus = self._ensure_bus()
+        except Exception as exc:
+            motors = {str(addr): {'error': str(exc)} for addr in (1, 2, 3, 4)}
+        else:
+            for addr, motor in bus.motors.items():
+                try:
+                    angle = motor.read_status()['multi_turn_deg']
+                    row = {'encoder_deg': angle}
+                    arm = self._arm
+                    if self.calibrated:
+                        row['joint_deg'] = (self.config.joint_offsets_deg[addr] + self.config.joint_signs[addr]
+                                            * (angle - arm.encoder_zero_deg[addr]))
+                    motors[str(addr)] = row
+                except Exception as exc:
+                    motors[str(addr)] = {'error': str(exc)}
+        try:
+            servo = self._ensure_servo()
+        except Exception as exc:
+            servos = {str(addr): {'error': str(exc)} for addr in (1, 2)}
+        else:
+            for addr in (1, 2):
+                try:
+                    servos[str(addr)] = {'angle_deg': servo.status(servo_id=addr)['angle_deg']}
+                except Exception as exc:
+                    servos[str(addr)] = {'error': str(exc)}
+        return {'stamp': time.time(), 'calibrated': self.calibrated, 'motors': motors, 'servos': servos}
 
     def _event(self, stop_event):
         return self._stop_event if stop_event is None else stop_event
@@ -45,11 +103,12 @@ class ArmSession:
             if self._arm is None:
                 from .controller import Arm
 
-                options = {"simulate": True} if self._simulate else {}
+                options = {'simulate': self._simulate, 'bus': self._ensure_bus()}
                 # 若此前单独操作夹爪，统一驱动共用该连接，避免重复打开 TTL 串口。
-                if self._servo is not None:
-                    options["gripper"] = self._servo
-                self._arm = Arm(self.config, **options)
+                with self._connection_lock:
+                    if self._servo is not None:
+                        options["gripper"] = self._servo
+                    self._arm = Arm(self.config, **options)
             else:
                 self._initial_joints = None
                 options = {} if event is None else {"stop_event": event}
@@ -78,6 +137,7 @@ class ArmSession:
         event = self._event(stop_event)
         options = {"wait": True, "order": "together"}
         if gripper is not None:
+            arm._gripper = self._ensure_servo()
             options["gripper"] = gripper
         if event is not None:
             options["stop_event"] = event
@@ -135,18 +195,13 @@ class ArmSession:
         check_cancel(event)
         try:
             if self._arm is not None:
-                servo = self._arm._connect_gripper()
+                with self._connection_lock:
+                    if self._servo is not None:
+                        self._arm._gripper = self._servo
+                    servo = self._arm._connect_gripper()
+                    self._servo = servo
             else:
-                if self._servo is None:
-                    from .servo import FeetechSTSServo
-
-                    config = self.config
-                    self._servo = FeetechSTSServo(
-                        port=config.gripper_port, baudrate=config.gripper_baudrate,
-                        servo_id=config.gripper_servo_id, speed=config.gripper_speed,
-                        timeout=config.gripper_timeout, simulate=self._simulate,
-                        release_on_close=config.gripper_release_on_close)
-                servo = self._servo
+                servo = self._ensure_servo()
             check_cancel(event)
             servo.move_angle(angle, wait=False)
             check_cancel(event)
@@ -164,12 +219,15 @@ class ArmSession:
                                  stop_event=stop_event)
 
     def close(self):
-        arm, servo = self._arm, self._servo
+        arm, servo, bus = self._arm, self._servo, self._bus
         self._arm = self._servo = None
+        self._bus = None
         self._initial_joints = None
         try:
             if arm is not None:
                 arm.close(disable_motors=False)
+            elif bus is not None:
+                bus.close(disable_motors=False)
         finally:
             # STS.close 幂等；若已由统一驱动关闭，共用的夹爪也只释放一次串口。
             if servo is not None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from .tasks import HELP, default_task_file, prepare_tasks, select_task_section, task_sections
+from .tasks import HELP, default_task_file, prepare_program, parse_tasks, DECISIONS, select_task_section, task_sections
 
 
 def wait(node, future, timeout):
@@ -74,8 +74,12 @@ def main(args=None):
     if text is not None:
         try:
             if opts.command is None:
-                text = select_task_section(text, opts.section)
-            steps = prepare_tasks(text)
+                selected = select_task_section(text, opts.section)
+                if opts.section not in (None, '主线') or not any(
+                        cmd in DECISIONS for _, cmd, _, _ in parse_tasks(selected)):
+                    text = selected
+            program = prepare_program(text)
+            steps = program.main
         except ValueError as exc:
             parser.error(str(exc))
     if text is not None and (opts.list or opts.dry_run):
@@ -83,6 +87,8 @@ def main(args=None):
             parser.error('本地校验不接受额外参数：' + ' '.join(ros_args))
         for index, step in enumerate(steps, 1):
             print(f"[{index}/{len(steps)}] {step.target}: {step.text}")
+        for name, branch in sorted(program.branches.items()):
+            print(f"子任务 [{name}]：{len(branch)} 步" + ("（空，选中时将报错）" if not branch else ""))
         print(f"清单有效，共 {len(steps)} 步")
         return 0
     try:

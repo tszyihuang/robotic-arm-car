@@ -107,11 +107,12 @@ class FeetechSTSServo:
             raise ProtocolError(f"舵机 ID{self.servo_id} 应答超时：需要 {size} 字节，收到 {len(data)}")
         return bytes(data)
 
-    def _exchange(self, instruction, params=b"", expected_size=0):
+    def _exchange(self, instruction, params=b"", expected_size=0, *, servo_id=None):
+        address = self.servo_id if servo_id is None else _integer(servo_id, "舵机 ID", 0, 253)
         with self._lock:
             if self._closed:
                 raise ArmError("舵机串口已关闭")
-            body = bytes((self.servo_id, len(params) + 2, instruction)) + params
+            body = bytes((address, len(params) + 2, instruction)) + params
             packet = b"\xff\xff" + body + bytes((_checksum(body),))
             self._ser.reset_input_buffer()
             if self._ser.write(packet) != len(packet):
@@ -119,7 +120,7 @@ class FeetechSTSServo:
             self._ser.flush()
             deadline = time.monotonic() + self.timeout
             header = self._read_exact(4, deadline)
-            if header[:2] != b"\xff\xff" or header[2] != self.servo_id:
+            if header[:2] != b"\xff\xff" or header[2] != address:
                 raise ProtocolError("舵机应答帧头或 ID 不匹配")
             length = header[3]
             if not 2 <= length <= 66:
@@ -128,16 +129,16 @@ class FeetechSTSServo:
             if _checksum(header[2:] + tail[:-1]) != tail[-1]:
                 raise ProtocolError("舵机应答校验和错误")
             if tail[0]:
-                raise ServoFault(f"舵机 ID{self.servo_id} 故障 0x{tail[0]:02X}："
+                raise ServoFault(f"舵机 ID{address} 故障 0x{tail[0]:02X}："
                                  f"{self.decode_error(tail[0])}")
             if length != expected_size + 2:
                 raise ProtocolError(f"舵机应答数据应为 {expected_size} 字节，实际 {length - 2}")
             return tail[1:-1]
 
-    def read_register(self, address, size=2):
+    def read_register(self, address, size=2, *, servo_id=None):
         address = _integer(address, "寄存器地址", 0, 255)
         size = _integer(size, "读取长度", 1, min(64, 256 - address))
-        return self._exchange(0x02, bytes((address, size)), size)
+        return self._exchange(0x02, bytes((address, size)), size, servo_id=servo_id)
 
     def _write_register(self, address, data):
         return self._exchange(0x03, bytes((address,)) + data)
@@ -146,18 +147,18 @@ class FeetechSTSServo:
         """返回编码器位置整数；STS 的负值按符号幅值解码。"""
         return _signed_magnitude(struct.unpack("<H", self.read_register(PRESENT_POSITION))[0])
 
-    def status(self):
+    def status(self, *, servo_id=None):
         with self._lock:
-            data = self.read_register(PRESENT_POSITION, 15)
+            data = self.read_register(PRESENT_POSITION, 15, servo_id=servo_id)
             position, speed = struct.unpack("<HH", data[:4])
             position = _signed_magnitude(position)
-            return {"id": self.servo_id, "position": position,
+            return {"id": self.servo_id if servo_id is None else servo_id, "position": position,
                     "angle_deg": position / SERVO_STEP_PER_DEG,
                     "speed_raw": _signed_magnitude(speed),
                     "voltage_v": data[6] / 10.0, "temperature_c": data[7],
                     "moving": bool(data[10]),
-                    "torque_enabled": bool(self.read_register(TORQUE_ENABLE, 1)[0]),
-                    "mode": self.read_register(MODE, 1)[0]}
+                    "torque_enabled": bool(self.read_register(TORQUE_ENABLE, 1, servo_id=servo_id)[0]),
+                    "mode": self.read_register(MODE, 1, servo_id=servo_id)[0]}
 
     def enable_torque(self):
         """显式使能；move_to 会先写目标再使能，避免恢复旧位置目标。"""
@@ -294,25 +295,28 @@ class _SimulatedServoSerial:
         self.memory[GOAL_POSITION:GOAL_POSITION + 2] = struct.pack("<H", 2048)
         self.memory[PRESENT_POSITION:PRESENT_POSITION + 2] = struct.pack("<H", 2048)
         self.memory[62:64] = bytes((120, 25))
+        self.memories = {servo_id: self.memory}
         self.buffer = b""
 
     def reset_input_buffer(self):
         self.buffer = b""
 
     def write(self, packet):
+        servo_id = packet[2]
+        memory = self.memories.setdefault(servo_id, bytearray(self.memory))
         instruction = packet[4]
         address = packet[5]
         data = b""
         if instruction == 0x02:
             size = packet[6]
-            data = bytes(self.memory[address:address + size])
+            data = bytes(memory[address:address + size])
         else:
             payload = packet[6:-1]
-            self.memory[address:address + len(payload)] = payload
-            if self.memory[TORQUE_ENABLE]:
-                self.memory[PRESENT_POSITION:PRESENT_POSITION + 2] = self.memory[
+            memory[address:address + len(payload)] = payload
+            if memory[TORQUE_ENABLE]:
+                memory[PRESENT_POSITION:PRESENT_POSITION + 2] = memory[
                     GOAL_POSITION:GOAL_POSITION + 2]
-        body = bytes((self.servo_id, len(data) + 2, 0)) + data
+        body = bytes((servo_id, len(data) + 2, 0)) + data
         self.buffer = b"\xff\xff" + body + bytes((_checksum(body),))
         return len(packet)
 

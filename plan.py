@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""任务表入口：默认执行主线，使用 --分段名 选择任务表中的其他分段。"""
+"""执行主线；plan 节点按扫码和当前画面选择子任务；--分段名 可单独调试。"""
 from pathlib import Path
 import sys
 

@@ -13,6 +13,10 @@ SPIN_SPEED_MM_S = 150.0
 
 
 HELP = """任务清单：每行一条，支持 # 注释。
+分段表按 [主线] 执行；抓球任务 / 打靶任务 / 抓物体任务 根据扫码和当前画面
+选择 [抓左边的小球] 等子任务，执行完返回主线。无分段的旧清单仍可使用。
+二维码为三位 1..3：小球颜色、靶颜色、物体形状。
+颜色 1=红 2=绿 3=蓝；形状 1=圆柱 2=圆锥 3=腰鼓。
   straight 距离 [速度] [kp-gap=数值 ki-gap=数值 kd-gap=数值]
   turn 角度 [半径]
   calibrate-position [speed=数值 max-distance=数值 impact-threshold=数值]
@@ -40,6 +44,12 @@ ARM_COMMANDS = frozenset(("arm-calibrate", "arm-move", "arm-home", "home", "arm-
                           "gripper-open", "gripper-close"))
 VISION_COMMANDS = frozenset(("scan-qrcode",))
 VISUAL_BASE_COMMANDS = frozenset(("vision-straight", "align"))
+DECISIONS = {"抓球任务": "ball", "排爆任务": "ball", "打靶任务": "target",
+             "反恐任务": "target", "抓物体任务": "object", "救援任务": "object"}
+POSITIONS = ("左边", "中间", "右边")
+BRANCH_NAMES = {kind: tuple(template.format(position) for position in POSITIONS)
+                for kind, template in (("ball", "抓{}的小球"), ("target", "打{}的靶"),
+                                       ("object", "抓{}的物体"))}
 _COMMON = {"log_path", "verbose"}
 _VISION = {key for key in settings.DEFAULTS if key.startswith("vision_")}
 _POSITION_NUMBERS = {"speed", "max_distance_m", "impact_threshold", "timeout",
@@ -124,6 +134,10 @@ def _positive(value, name, allow_zero=False, maximum=None):
 
 def _prepare_step(cmd, argv, line, params):
     """纯参数解析与校验；整份清单在打开硬件前调用。"""
+    if cmd in DECISIONS:
+        if argv:
+            raise ValueError(f"`{line}` 不接受参数")
+        return cmd, (), {}
     if cmd == "scan-qrcode":
         kwargs = {}
         for token in argv:
@@ -251,6 +265,8 @@ class PreparedTask:
 
     @property
     def target(self):
+        if self.command in DECISIONS:
+            return "plan"
         if self.command in VISION_COMMANDS:
             return "vision"
         return "base" if self.command in BASE_COMMANDS else "arm"
@@ -260,11 +276,9 @@ class PreparedTask:
         return self.command in VISUAL_BASE_COMMANDS
 
 
-def prepare_tasks(text, params=None, *, require_calibration=True):
-    """Validate the complete list without opening hardware or importing ROS."""
+def _prepare_lines(lines, params, require_calibration, calibrated=False):
     prepared = []
-    calibrated = False
-    for lineno, cmd, argv, line in parse_tasks(text):
+    for lineno, cmd, argv, line in lines:
         try:
             command, args, kwargs = _prepare_step(cmd, argv, line, params or {})
             if command == "arm-calibrate":
@@ -274,6 +288,58 @@ def prepare_tasks(text, params=None, *, require_calibration=True):
         except (ValueError, TypeError) as exc:
             raise ValueError(f"清单第 {lineno} 行：{exc}") from exc
         prepared.append(PreparedTask(lineno, command, args, kwargs, line))
-    if not prepared:
-        raise ValueError("任务清单为空")
-    return prepared
+    return prepared, calibrated
+
+
+@dataclass(frozen=True)
+class TaskProgram:
+    main: list
+    branches: dict
+
+    @property
+    def all_steps(self):
+        kinds = {DECISIONS[s.command] for s in self.main if s.command in DECISIONS}
+        return self.main + [step for kind in kinds for name in BRANCH_NAMES[kind]
+                            for step in self.branches.get(name, [])]
+
+
+def prepare_program(text, params=None, *, require_calibration=True):
+    """Parse the main route and validate all branch definitions before execution."""
+    sections = task_sections(text)
+    main_text = select_task_section(text) if sections else text
+    main, _ = _prepare_lines(parse_tasks(main_text), params, False)
+    if not main:
+        raise ValueError("主线任务清单为空")
+    branches = {}
+    used_names = {name for s in main if s.command in DECISIONS
+                  for name in BRANCH_NAMES[DECISIONS[s.command]]}
+    for name in used_names:
+        steps, _ = _prepare_lines(parse_tasks(sections.get(name, "")), params, False)
+        if any(step.command in DECISIONS for step in steps):
+            raise ValueError(f"子任务 [{name}] 中不能嵌套任务选择")
+        branches[name] = steps
+    calibrated, scanned = False, False
+    for step in main:
+        if step.command in DECISIONS:
+            if require_calibration and not scanned:
+                raise ValueError(f"清单第 {step.lineno} 行：{step.command} 前必须执行 scan-qrcode")
+            for name in BRANCH_NAMES[DECISIONS[step.command]]:
+                state = calibrated
+                for child in branches.get(name, []):
+                    if child.command == "arm-calibrate":
+                        state = True
+                    elif require_calibration and child.command in ("arm-move", "arm-home", "home") and not state:
+                        raise ValueError(f"清单第 {child.lineno} 行：子任务 [{name}] 的机械臂动作前必须校准")
+            # A branch may be empty; it cannot establish calibration for the main route.
+        elif step.command == "arm-calibrate":
+            calibrated = True
+        elif step.command == "scan-qrcode":
+            scanned = True
+        elif require_calibration and step.command in ("arm-move", "arm-home", "home") and not calibrated:
+            raise ValueError(f"清单第 {step.lineno} 行：机械臂动作前必须先执行 arm-calibrate（同一份清单）")
+    return TaskProgram(main, branches)
+
+
+def prepare_tasks(text, params=None, *, require_calibration=True):
+    """Compatibility entry: return the main route after validating the entire program."""
+    return prepare_program(text, params, require_calibration=require_calibration).main

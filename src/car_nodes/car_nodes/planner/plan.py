@@ -9,7 +9,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import Bool
 
 from ..common.control import MotionCancelled, check_cancel, wait_cancelable
-from .tasks import prepare_tasks, PreparedTask
+from .tasks import prepare_program, PreparedTask, DECISIONS
+from .decision import mission_code, selected_branch
 from car_interfaces.action import ExecuteCommand, RunTasks
 from ..common.action_node import SerialActionNode, json_text, run_node
 from ..base.vision_source import RosVisionSource
@@ -45,10 +46,10 @@ class PlanNode(SerialActionNode):
     def prepare(self, request):
         if not math.isfinite(request.gap_s) or request.gap_s < 0:
             raise ValueError('gap_s 必须是有限非负数')
-        steps = prepare_tasks(request.tasks)
+        program = prepare_program(request.tasks)
         self._mission_results = []
         self.qr_data = None
-        return steps, request
+        return program, request
 
     def _wait_future(self, future, stop_event, timeout):
         deadline = time.monotonic() + timeout
@@ -105,12 +106,13 @@ class PlanNode(SerialActionNode):
             raise
 
     def run(self, prepared, handle, stop_event):
-        steps, request = prepared
+        program, request = prepared
+        steps = program.main
         dry_run = self.get_parameter('dry_run').value or request.dry_run
         if not dry_run:
             # Check all required servers before the first physical action.
-            targets = {step.target for step in steps}
-            if any(step.needs_vision for step in steps):
+            targets = {step.target for step in program.all_steps} - {'plan'}
+            if any(step.needs_vision or step.command in DECISIONS for step in program.all_steps):
                 targets.add('vision')
             for target in targets:
                 deadline = time.monotonic() + self.get_parameter('server_wait').value
@@ -118,7 +120,7 @@ class PlanNode(SerialActionNode):
                     check_cancel(stop_event)
                     if time.monotonic() >= deadline:
                         raise RuntimeError(f'{target} Action 服务未启动')
-            if any(step.needs_vision for step in steps):
+            if any(step.needs_vision for step in program.all_steps):
                 self._progress = (0, len(steps), '', 'vision_warmup')
                 result = self._execute_step(PreparedTask(0, 'start-boundary', (), {}, 'start-boundary'),
                                             stop_event, target='vision')
@@ -128,23 +130,59 @@ class PlanNode(SerialActionNode):
                                               log=self.get_logger().info, stop_event=stop_event):
                     raise RuntimeError('视觉模型或摄像头未就绪，任务未开始')
         results = self._mission_results
-        for index, step in enumerate(steps, 1):
+        pending = [(step, None) for step in steps]
+        total, index = len(steps), 0
+        while pending:
+            step, branch = pending.pop(0)
+            index += 1
             check_cancel(stop_event)
-            self._progress = (index, len(steps), step.text, 'dry_run' if dry_run else 'running')
+            self._progress = (index, total, step.text, 'dry_run' if dry_run else 'running')
             if dry_run:
                 results.append({'command': step.text, 'success': True, 'dry_run': True})
+            elif step.command in DECISIONS:
+                kind = DECISIONS[step.command]
+                try:
+                    value = mission_code(self.qr_data)[kind]
+                    command = f'observe-target kind={kind} value={value}'
+                    self._progress = (index, total, step.text, 'selecting')
+                    observed = self._execute_step(PreparedTask(step.lineno, 'observe-target', (), {}, command),
+                                                  stop_event, target='vision')
+                    if not observed['success']:
+                        raise ValueError(observed['message'])
+                    info = json.loads(observed['details_json'])
+                    name = selected_branch(kind, info.get('position'))
+                    branch_steps = program.branches.get(name)
+                    if not branch_steps:
+                        raise ValueError(f'选中的子任务 [{name}] 未定义或为空，请补充任务指令')
+                    total += len(branch_steps)
+                    pending[0:0] = [(child, name) for child in branch_steps]
+                    result = {'command': step.text, 'success': True, 'selected_branch': name,
+                              'target_value': value, 'observation': info}
+                    self.get_logger().info(f'{step.command}：扫码目标 {value}，执行 [{name}]')
+                except (ValueError, TypeError, KeyError) as exc:
+                    result = {'command': step.text, 'success': False, 'message': str(exc)}
+                results.append(result)
+                if not result['success'] and not request.keep_going:
+                    break
             else:
                 if step.command == 'scan-qrcode':
                     self.qr_data = None
                 result = self._execute_step(step, stop_event)
-                results.append(result)
                 if step.command == 'scan-qrcode' and result['success']:
                     self.qr_data = json.loads(result['details_json']).get('qr_data')
+                    if any(s.command in DECISIONS for s in steps):
+                        try:
+                            mission_code(self.qr_data)
+                        except ValueError as exc:
+                            result.update(success=False, message=str(exc))
+                if branch:
+                    result['branch'] = branch
+                results.append(result)
                 if not result['success'] and not request.keep_going:
                     break
-            if not dry_run and index < len(steps):
+            if not dry_run and pending:
                 wait_cancelable(request.gap_s, stop_event)
-        return {'ok': all(result['success'] for result in results) and len(results) == len(steps),
+        return {'ok': all(result['success'] for result in results) and not pending,
                 'completed_steps': sum(result['success'] for result in results),
                 'dry_run': dry_run, 'qr_data': self.qr_data, 'results': results}
 

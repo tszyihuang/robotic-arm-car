@@ -41,4 +41,7 @@
     infer_device: "cpu"
     enable_objects: true
     scan_timeout: 30.0
+    observe_timeout: 10.0
+    observe_stable_frames: 3
+    target_min_area_ratio: 0.001
     publish_hz: 25.0

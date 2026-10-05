@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock
 
 try:
     import rclpy
@@ -176,6 +177,147 @@ class RosPipelineTests(unittest.TestCase):
             self.assertIsNone(details['qr_data'])
         finally:
             self.vision.run = original
+
+    def test_all_decision_kinds_execute_selected_branch_then_resume_main(self):
+        from car_nodes.planner.tasks import BRANCH_NAMES
+        for marker, kind, value in (('抓球任务', 'ball', 'green'), ('打靶任务', 'target', 'red'),
+                                    ('抓物体任务', 'object', 'cylinder')):
+            for position in (0, 1, 2):
+                with self.subTest(marker=marker, position=position):
+                    trace = []
+                    original_vision, original_arm, original_base = self.vision.run, self.arm.run, self.base.run
+                    def vision(step, handle, stop_event):
+                        trace.append(step.command)
+                        if step.command == 'scan-qrcode':
+                            return {'ok': True, 'qr_data': '211'}
+                        self.assertEqual(step.command, 'observe-target')
+                        self.assertEqual(step.kwargs, {'kind': kind, 'value': value})
+                        return {'ok': True, 'position': position}
+                    def arm(step, handle, stop_event):
+                        trace.append(step.command)
+                        return original_arm(step, handle, stop_event)
+                    def base(step, handle, stop_event):
+                        trace.append(step.text)
+                        return original_base(step, handle, stop_event)
+                    self.vision.run, self.arm.run, self.base.run = vision, arm, base
+                    try:
+                        text = f'[主线]\nscan-qrcode\n{marker}\nstraight 0.5\n'
+                        for i, name in enumerate(BRANCH_NAMES[kind]):
+                            text += f'[{name}]\nstraight {0.1 * (i+1):.1f}\n'
+                        result = self.mission(text)
+                        self.assertTrue(result.success, result.message)
+                        self.assertEqual(trace, ['scan-qrcode', 'observe-target', f'straight {0.1*(position+1):.1f}', 'straight 0.5'])
+                        details = json.loads(result.details_json)
+                        self.assertEqual(details['results'][1]['selected_branch'], BRANCH_NAMES[kind][position])
+                        self.assertEqual(result.completed_steps, 4)
+                    finally:
+                        self.vision.run, self.arm.run, self.base.run = original_vision, original_arm, original_base
+
+    def test_empty_selected_branch_and_bad_qr_stop_before_next_motion(self):
+        original = self.vision.run
+        for qr, error in (('211', '为空'), ('123+321', '三位')):
+            with self.subTest(qr=qr):
+                def vision(step, handle, stop_event):
+                    return {'ok': True, 'qr_data': qr} if step.command == 'scan-qrcode' else {'ok': True, 'position': 0}
+                self.vision.run = vision
+                try:
+                    result = self.mission('[主线]\nscan-qrcode\n抓球任务\nstraight 0.5\n[抓左边的小球]\n')
+                    self.assertFalse(result.success)
+                    rows = json.loads(result.details_json)['results']
+                    self.assertFalse(any(row['command'] == 'straight 0.5' for row in rows))
+                    self.assertIn(error, rows[-1]['message'])
+                finally:
+                    self.vision.run = original
+
+    def test_angle_debug_program_prints_all_six_devices_without_hardware(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run([sys.executable, '-B', str(root / 'debug/angles.py'),
+                                 '--namespace', '/car_test', '--duration', '1.0', '--hz', '5'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for label in ('电机1', '电机2', '电机3', '电机4', '舵机1', '舵机2'):
+            self.assertIn(label, result.stdout)
+        self.assertIn('dry_run', result.stdout)
+        self.assertIsNone(self.arm.session._arm)
+        self.assertIsNone(self.arm.session._bus)
+        self.assertIsNone(self.arm._telemetry_timer)
+
+    def test_camera_debug_receives_images_switches_models_and_scans_shared_camera(self):
+        import cv2
+        import numpy as np
+        from car_nodes.common.control import check_cancel
+        from car_nodes.debug.camera_web import CameraDebug
+        from car_nodes.vision.node import virtual_geometry
+        frame = np.full((1080, 1920, 3), 255, dtype=np.uint8)
+        qr = cv2.resize(cv2.QRCodeEncoder_create().encode('211'), (400, 400), interpolation=cv2.INTER_NEAREST)
+        frame[340:740, 760:1160] = cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
+        class Camera:
+            device, index, error = 0, 0, ''
+            def __init__(self):
+                self.condition = threading.Condition()
+                self.frame = frame
+                self.capture_stamp = time.time()
+                self.stop = threading.Event()
+                self.thread = threading.Thread(target=self.capture)
+                self.thread.start()
+            def capture(self):
+                while not self.stop.wait(0.03):
+                    with self.condition:
+                        self.index += 1
+                        self.capture_stamp = time.time()
+                        self.condition.notify_all()
+            def next_frame(self, after=0, timeout=3, stop_event=None):
+                deadline = time.monotonic() + timeout
+                with self.condition:
+                    while self.index <= after:
+                        check_cancel(stop_event)
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('模拟摄像头超时')
+                        self.condition.wait(0.02)
+                    return self.frame, self.index, self.capture_stamp
+            def close(self):
+                self.stop.set()
+                self.thread.join()
+        camera = Camera()
+        geometry = virtual_geometry()
+        geometry['timing_ms'] = {'total': 0.0}
+        boundary = Mock()
+        boundary.predict.return_value = geometry
+        objects = Mock()
+        objects.predict.return_value = {'detections': [], 'timing_ms': {'total': 0.0}}
+        old_camera, old_models = self.vision.camera, self.vision._models
+        debug = CameraDebug('/car_test')
+        self.executor.add_node(debug)
+        try:
+            self.vision.set_parameters([Parameter('dry_run', value=False)])
+            self.vision.camera, self.vision._models = camera, (boundary, objects)
+            self.assertTrue(debug.command('start-camera')['ok'])
+            self.assertTrue(debug.command('set-models boundary=false objects=true')['ok'])
+            deadline = time.monotonic() + 3
+            while debug.image is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            decoded = cv2.imdecode(np.frombuffer(debug.snapshot(), dtype=np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(decoded.shape, frame.shape)
+            self.assertEqual(boundary.predict.call_count, 0)
+            self.assertGreater(objects.predict.call_count, 0)
+            self.assertEqual(debug.command('scan-qrcode')['qr_data'], '211')
+            self.assertTrue(debug.command('set-models boundary=false objects=false')['ok'])
+            count = objects.predict.call_count
+            time.sleep(0.15)
+            self.assertLessEqual(objects.predict.call_count, count + 1)
+            self.assertIs(self.vision.camera, camera)
+            self.assertIsNotNone(debug.snapshot())
+        finally:
+            self.vision._inference_stop.set()
+            if self.vision._inference_thread is not None:
+                self.vision._inference_thread.join(timeout=3)
+            camera.close()
+            self.vision.camera, self.vision._models = old_camera, old_models
+            self.vision._preview = False
+            self.vision._boundary = self.vision._objects = None
+            self.vision.set_parameters([Parameter('dry_run', value=True)])
+            self.executor.remove_node(debug)
+            debug.destroy_node()
 
     def test_invalid_task_is_rejected_before_any_child_action(self):
         client = self.client(RunTasks, 'tasks/run')

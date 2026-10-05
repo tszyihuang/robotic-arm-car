@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>摄像头调试</title>
+<style>
+body{background:#10151e;color:#e8edf6;font:16px system-ui;margin:0;padding:24px;max-width:1200px;margin:auto}
+h1{font-size:24px} .bar{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin:20px 0}
+button,a{background:#284b80;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer;text-decoration:none}
+button:disabled{opacity:.5;cursor:wait} img{width:100%;background:#05080d;border-radius:12px;min-height:200px}
+pre{white-space:pre-wrap;background:#1a2332;padding:16px;border-radius:10px}label{cursor:pointer}
+</style>
+<h1>摄像头调试</h1>
+<div class="bar"><label><input id="boundary" type="checkbox"> 边界 YOLO</label>
+<label><input id="objects" type="checkbox"> 物体 YOLO</label>
+<button id="apply">应用模型开关</button><a href="/snapshot.jpg">截图下载</a><button id="scan">扫码</button></div>
+<p id="status">等待画面…</p><img id="view" alt="摄像头画面"><pre id="result">扫码结果会显示在这里。</pre>
+<script>
+const $=id=>document.getElementById(id);let busy=false,initialized=false;
+async function action(path,body){if(busy)return;busy=true;$('apply').disabled=$('scan').disabled=true;
+ $('result').textContent='正在处理…';try{const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const data=await response.json();if(!response.ok)throw Error(data.error);
+ $('result').textContent=data.qr_data!==undefined?'扫码结果：'+data.qr_data:JSON.stringify(data,null,2);
+ }catch(error){$('result').textContent=error.message;}finally{busy=false;$('apply').disabled=$('scan').disabled=false;initialized=false;}}
+$('apply').onclick=()=>action('/api/models',{boundary:$('boundary').checked,objects:$('objects').checked});
+$('scan').onclick=()=>action('/api/scan',{});
+async function refresh(){try{const response=await fetch('/api/status');const data=await response.json();
+ $('status').textContent=data.dry_run?'当前为干跑模式，没有真实画面':data.error||
+ (data.image_age===null||data.image_age>1?'等待新鲜画面…':'画面实时更新 · 模型状态：'+data.state);
+ if(!initialized&&data.models){$('boundary').checked=data.models.boundary;$('objects').checked=data.models.objects;initialized=true;}
+ if(data.image_age!==null&&data.image_age<1)$('view').src='/frame.jpg?t='+Date.now();
+ }catch(error){$('status').textContent='连接中断：'+error.message;}setTimeout(refresh,200);}refresh();
+</script></html>
