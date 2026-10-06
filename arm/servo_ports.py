@@ -128,6 +128,6 @@ def detect_servo_device(*, port=None, baudrate=None, servo_id=1, timeout=0.1):
         raise ArmError(f"未收到舵机 ID{servo_id} 的有效状态回包。请检查 TTL 接线、供电或 ID；{detail}")
     if len(matches) > 1:
         detail = ", ".join(f"{m['port']} ({m['baudrate']} baud)" for m in matches)
-        raise ArmError(f"多个串口均检测到舵机 ID{servo_id}，请用 --port 指定：{detail}")
+        raise ArmError(f"多个串口均检测到舵机 ID{servo_id}，请在 config.py 的 ARM[gripper_port] 指定：{detail}")
     _save_binding(matches[0])
     return matches[0]

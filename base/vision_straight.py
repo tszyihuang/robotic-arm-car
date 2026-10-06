@@ -1,7 +1,6 @@
 """视觉直走：直接边界反馈、中心线几何与航向／轮速闭环。"""
 from __future__ import annotations
 
-import csv
 import math
 import time
 from collections import deque
@@ -9,91 +8,41 @@ from dataclasses import dataclass
 
 from . import straight_pid
 from config import BASE, STRAIGHT, VISION_CONTROL
+from .control import CsvLog, clamp, cleanup, check_cancel, format_number, wait_cancelable
+from .feedback import WheelOdometry
+
 IMU_STALE = BASE["feedback_stale"]
-from .control import cleanup, check_cancel, wait_cancelable
-
-# ============================== 默认参数 ==============================
-
-FRAME_W = VISION_CONTROL["FRAME_W"]
-FRAME_H = VISION_CONTROL["FRAME_H"]
-
-LOOKAHEAD = VISION_CONTROL["LOOKAHEAD"]
-FOV_DEG = VISION_CONTROL["FOV_DEG"]
-RATE_TAU = VISION_CONTROL["RATE_TAU"]
-RATE_MAX = VISION_CONTROL["RATE_MAX"]
-E_TAU = VISION_CONTROL["E_TAU"]
-E_GATE = VISION_CONTROL["E_GATE"]
-E_DEAD = VISION_CONTROL["E_DEAD"]
-RATE_SRC = VISION_CONTROL["RATE_SRC"]
-GAP_WINDOW = VISION_CONTROL["GAP_WINDOW"]
-GAP_TAU = VISION_CONTROL["GAP_TAU"]
-LOST_STOP = VISION_CONTROL["LOST_STOP"]
-MAX_DEV = VISION_CONTROL["MAX_DEV"]
-TRACK_WAIT = VISION_CONTROL["TRACK_WAIT"]
-
-# ---- ② 航向环双环：外环（角度）把视觉误差变成目标角速度，内环（角速度）再把它
-#      变成差动。内环反馈默认用电机 gap，所以外环不用再替视觉延时操心 ----
-KP_YAW = VISION_CONTROL["KP_YAW"]
-KI_YAW = VISION_CONTROL["KI_YAW"]
-YAW_W_MAX = VISION_CONTROL["YAW_W_MAX"]
-KP_RATE = VISION_CONTROL["KP_RATE"]
-KI_RATE = VISION_CONTROL["KI_RATE"]
-KFF = VISION_CONTROL["KFF"]
-KD_RATE = VISION_CONTROL["KD_RATE"]
-
-
-TRIM_MAX = VISION_CONTROL["TRIM_MAX"]
-MIN_CONF = VISION_CONTROL["MIN_CONF"]
-
-
-def clamp(v, lo, hi):
-    return lo if v < lo else (hi if v > hi else v)
-
-
-@dataclass
-class BoundarySample:
-    """视觉对象最近一帧的状态和采集时间。"""
-
-    info: dict | None       # 最近一次"检出了边界"的 info（没有就是 None）
-    frames: object          # 采集帧号
-    seq: int                # 有效帧计数：每换一帧 +1（控制侧看它判断"新帧"）
-    state: str              # off / loading / ready / error
-    error: str              # 模型或采集的报错文本
-    t: float                # 最近一次收到视觉反馈的时间
-    t_valid: float          # 最近一次拿到"有边界"的帧的时间（0 = 从没有过）
-    frame_dt: float = 0.0   # 这一帧从"采集完"到"控制侧拿到"隔了多久（秒）
 
 
 @dataclass
 class VisionCfg:
     """视觉与控制参数（默认值来自 config.py；测试可直接构造）。"""
 
-    lookahead: float | str = LOOKAHEAD  # 比例，或 "vanishing"（两侧边界延长线交点）
-    fov_deg: float = FOV_DEG
+    lookahead: float | str = VISION_CONTROL["LOOKAHEAD"]  # 比例，或 "vanishing"（两侧边界延长线交点）
+    fov_deg: float = VISION_CONTROL["FOV_DEG"]
     focal_px: float | None = None
-    width: int = FRAME_W
-    height: int = FRAME_H
-    min_conf: float = MIN_CONF
+    width: int = VISION_CONTROL["FRAME_W"]
+    height: int = VISION_CONTROL["FRAME_H"]
+    min_conf: float = VISION_CONTROL["MIN_CONF"]
     dir_sign: float = VISION_CONTROL["dir_sign"]
-    kp_yaw: float = KP_YAW          # 外环（角度环）
-    ki_yaw: float = KI_YAW
-    w_max: float = YAW_W_MAX
-    kp_rate: float = KP_RATE        # 内环（角速度环）
-    ki_rate: float = KI_RATE
-    kff: float = KFF                # 前馈：ω_ref -> 差动（按轮距换算）
-    kd_rate: float = KD_RATE
-    rate_tau: float = RATE_TAU
-    e_tau: float = E_TAU
-    e_gate: float = E_GATE
-    e_dead: float = E_DEAD
+    kp_yaw: float = VISION_CONTROL["KP_YAW"]          # 外环（角度环）
+    ki_yaw: float = VISION_CONTROL["KI_YAW"]
+    w_max: float = VISION_CONTROL["YAW_W_MAX"]
+    kp_rate: float = VISION_CONTROL["KP_RATE"]        # 内环（角速度环）
+    ki_rate: float = VISION_CONTROL["KI_RATE"]
+    kff: float = VISION_CONTROL["KFF"]                # 前馈：ω_ref -> 差动（按轮距换算）
+    kd_rate: float = VISION_CONTROL["KD_RATE"]
+    e_tau: float = VISION_CONTROL["E_TAU"]
+    e_gate: float = VISION_CONTROL["E_GATE"]
+    e_dead: float = VISION_CONTROL["E_DEAD"]
     predict: bool = True
-    rate_src: str = RATE_SRC          # 内环角速度来源：gap / gyro
-    gap_window: float = GAP_WINDOW
-    gap_tau: float = GAP_TAU
+    rate_src: str = VISION_CONTROL["RATE_SRC"]          # 内环角速度来源：gap / gyro
+    gap_window: float = VISION_CONTROL["GAP_WINDOW"]
+    gap_tau: float = VISION_CONTROL["GAP_TAU"]
     track_mm: float = STRAIGHT["TRACK_MM"]           # 左右轮中心距：里程差 <-> 角度、前馈换算都用它
-    trim_max: float = TRIM_MAX
-    max_dev: float = MAX_DEV
-    lost_stop: float = LOST_STOP
+    trim_max: float = VISION_CONTROL["TRIM_MAX"]
+    max_dev: float = VISION_CONTROL["MAX_DEV"]
+    lost_stop: float = VISION_CONTROL["LOST_STOP"]
     speed: float = STRAIGHT["SPEED_CRUISE"]
     accel: float = STRAIGHT["ACCEL"]
     margin: float = STRAIGHT["MARGIN_MM"]
@@ -108,7 +57,7 @@ class VisionCfg:
         return self.width, self.height
 
     def focal(self, width: int) -> float:
-        """焦距（像素）：--focal-px 优先，否则由水平视场角换算。"""
+        """焦距（像素）：优先使用 focal_px，否则由水平视场角换算。"""
         if self.focal_px:
             return float(self.focal_px)
         return 0.5 * width / math.tan(math.radians(self.fov_deg) / 2.0)
@@ -147,10 +96,8 @@ def _side_rec(rec: dict | None, cfg: VisionCfg, height: float):
         return None
     if not (math.isfinite(a) and math.isfinite(b)):
         return None
-    y_near = rec.get("near_y")          # 近端行（大 y）；老版本没有就按画面底部算
+    y_near = rec.get("near_y")          # 近端行（大 y）；缺少范围时按画面底部算
     y_far = rec.get("far_y")
-    if y_far is None:
-        y_far = rec.get("stop_row")
     y_near = height - 1.0 if y_near is None else float(y_near)
     y_far = 0.0 if y_far is None else float(y_far)
     angle = rec.get("angle_deg")
@@ -249,7 +196,6 @@ class Heading:
 
     e: float                # 相对画幅中心的误差（度）：+ = 需要往左修；已滤波和外推
     e_raw: float            # 帧时刻相对画幅中心的原始几何误差（诊断用）
-    rate: float             # 视觉差分算出的"往左转"角速度（度/秒）
     lat_px: float           # 目标点相对画面中心的像素（前视点或灭点）
     head_deg: float | None  # 灭点算的纯航向项
     src: str                # both / left / right
@@ -276,7 +222,7 @@ class ImuSource:
 class WheelGapSource:
     """左右轮里程差（gap）当角速度来源 —— 不用陀螺，就是电机自己的数据。"""
 
-    def __init__(self, track_mm=190.0, window=GAP_WINDOW, tau=GAP_TAU):
+    def __init__(self, track_mm=190.0, window=VISION_CONTROL["GAP_WINDOW"], tau=VISION_CONTROL["GAP_TAU"]):
         self.track = max(float(track_mm), 1e-3)
         self.window = max(float(window), 0.02)
         self.tau = max(float(tau), 0.0)
@@ -301,21 +247,14 @@ class WheelGapSource:
         return self.rate
 
 
-def _num(v: float | None, fmt: str = ".1f") -> str:
-    """CSV 用：不是有限数就写空，别让 nan 混进日志。"""
-    return "" if v is None or not math.isfinite(v) else format(v, fmt)
-
-
 class HeadingCascade:
     """航向环双环 PID：外环角度环（视觉）+ 内环角速度环（电机 gap / 陀螺）。"""
 
-    kind = "cascade"
     yaw_i_frac = 0.5             # 外环积分贡献最多给到 w_max 的这个比例
     rate_i_frac = 0.6            # 内环积分贡献最多给到 trim_max 的这个比例
 
-    def __init__(self, cfg: VisionCfg, src: str = "gap"):
+    def __init__(self, cfg: VisionCfg):
         self.cfg = cfg
-        self.src = src
         self.track = max(float(cfg.track_mm), 1e-3)
         # 1 度/秒的目标角速度，按差速运动学需要多少差动（mm/s）
         self.gain_ff = math.radians(1.0) * 0.5 * self.track
@@ -323,7 +262,6 @@ class HeadingCascade:
                           if cfg.ki_yaw > 0 else 0.0)
         self.i_rate_max = (self.rate_i_frac * cfg.trim_max / cfg.ki_rate
                            if cfg.ki_rate > 0 else 0.0)
-        self.i_yaw = self.i_rate = 0.0
         self.reset()
 
     def reset(self) -> None:
@@ -361,10 +299,6 @@ class HeadingCascade:
         return trim
 
 
-def make_heading_loop(cfg: VisionCfg):
-    return HeadingCascade(cfg, src=cfg.rate_src)
-
-
 class VisionHeading:
     """把摄像头最新的边界变成航向环的输入：角度误差 e（外环）+ 角速度（内环）。"""
 
@@ -373,7 +307,6 @@ class VisionHeading:
         self.half_px = None         # 最近一次两侧都在时量到的前视行半宽
         self.ref = {}               # 单侧退化用的参考角 {'left': 度, 'right': 度}
         self.e = self.e_raw = 0.0
-        self.rate = 0.0
         self.e_filt = None          # 低通之后的误差（帧时刻的值）
         self.src = None             # 角速度来源（gap / 陀螺），用它外推误差
         self.n_gated = 0            # 被跳变保护截断的帧数
@@ -385,14 +318,13 @@ class VisionHeading:
         self.n_single = 0           # 其中只有单侧边界的帧数（用半宽补齐中心线）
         self.n_degraded = 0         # 其中连半宽都没有、只能按相对角算的帧数
         self._seq = 0
-        self._prev = None           # (e, t)：视觉差分用
 
     # ---- 出发前检查跑道几何 ----
     def age(self, now=None) -> float:
         """距最近一帧有效边界多久（秒）。"""
         return self.cam.age(now)
 
-    def wait_track(self, seconds: float = TRACK_WAIT, log=print, stop_event=None) -> TrackView | None:
+    def wait_track(self, seconds: float = VISION_CONTROL["TRACK_WAIT"], log=print, stop_event=None) -> TrackView | None:
         """等待可信的跑道几何并记住半宽；误差始终以画幅中心为基准。"""
         end = time.monotonic() + max(seconds, 0.0)
         saw_relative = False
@@ -425,10 +357,6 @@ class VisionHeading:
         if v.angle_right is not None:
             self.ref.setdefault("right", v.angle_right)
 
-    def attach_imu(self, imu) -> None:
-        """挂上陀螺当角速度来源（等价于 --rate-src gyro）。"""
-        self.attach_source(ImuSource(imu))
-
     def attach_source(self, src) -> None:
         """挂一路"快"的角速度来源（要有 .heading 属性，左转为正，单位度）。
 
@@ -440,9 +368,7 @@ class VisionHeading:
         self._yaw_frame = None
 
     def reset_run(self) -> None:
-        """每趟出发前清一下差分状态，别把上一趟的尾巴带进来。"""
-        self._prev = None
-        self.rate = 0.0
+        """每趟出发前重置视觉滤波与帧时间。"""
         self.e_filt = None
         self.t_frame = 0.0
         self._yaw_frame = None
@@ -482,7 +408,7 @@ class VisionHeading:
             self._seq = s.seq
             v = track_view(self.cfg, s.info, self.half_px, self.ref)
             if v is None and self.cfg.lookahead == "vanishing":
-                # HTTP 仍有新帧不等于灭点仍有效；清掉旧结果，让控制侧停车。
+                # 摄像头仍有新帧不等于灭点仍有效；清掉旧结果，让控制侧停车。
                 self.view = None
                 return None
             if v is not None:
@@ -493,7 +419,7 @@ class VisionHeading:
                 self._remember(v)
                 e_raw = v.e_deg
                 e_frame = e_raw  # 固定以画幅中心为目标，保留起步时已有的偏移。
-                # 坏帧保护：一帧之差超过 --e-gate 度就截断。关键点预测偶尔会跳一下，
+                # 坏帧保护：一帧之差超过 e_gate 度就截断。关键点预测偶尔会跳一下，
                 # 单帧跳变直接进 PID 就是把方向盘掰一下，是"抖/摆"的常见来源。
                 if self.e_filt is not None and self.cfg.e_gate > 0:
                     pred = self._predict(now, yaw_now)
@@ -508,17 +434,8 @@ class VisionHeading:
                 else:
                     alpha = dt_v / (self.cfg.e_tau + dt_v)
                     self.e_filt += alpha * (e_frame - self.e_filt)
-                # 视觉角速度：车往左转时误差 e 变小，所以 rate = -de/dt
-                if self._prev is not None:
-                    dt = now - self._prev[1]
-                    if 0.02 <= dt <= 0.6:
-                        raw = clamp(-(self.e_filt - self._prev[0]) / dt,
-                                    -RATE_MAX, RATE_MAX)
-                        alpha = dt / (self.cfg.rate_tau + dt)
-                        self.rate += alpha * (raw - self.rate)
-                self._prev = (self.e_filt, now)
                 # 记下这帧的采集时刻和当时的车头朝向，供后面每拍外推
-                lag = float(getattr(s, "frame_dt", 0.0) or 0.0)
+                lag = s.frame_dt
                 t_cap = max(now - lag, self.t_frame)
                 self._yaw_frame = self._yaw_at(t_cap) if self.src is not None else None
                 self.t_frame = t_cap
@@ -526,7 +443,7 @@ class VisionHeading:
         if self.view is None:
             return None
         self.e = self._predict(now, yaw_now)
-        return Heading(e=self.e, e_raw=self.e_raw, rate=self.rate,
+        return Heading(e=self.e, e_raw=self.e_raw,
                        lat_px=self.view.lat_px, head_deg=self.view.head_deg,
                        src=self.view.src, absolute=self.view.absolute,
                        age=self.age(now), new=new)
@@ -535,24 +452,21 @@ class VisionHeading:
 LOG_COLUMNS = ['t', 'dist_mm', 'e_deg', 'e_raw_deg', 'lat_px', 'head_deg', 'w_ref_dps', 'w_meas_dps', 'w_err_dps', 'trim_ff', 'trim_fb', 'trim_mms', 'v_l', 'v_r', 'set_l', 'set_r', 'gap_mm', 'src']
 
 
-class _RunLog:
-    """逐拍写 CSV（不给路径就是空操作），列见 LOG_COLUMNS。"""
-
-    def __init__(self, path):
-        self.fp = open(path, "w", newline="") if path else None
-        self.wr = csv.writer(self.fp) if self.fp else None
-        if self.wr:
-            self.wr.writerow(LOG_COLUMNS)
-
-    def row(self, *vals) -> None:
-        if self.wr:
-            self.wr.writerow(vals)
-
-    def close(self) -> None:
-        if self.fp:
-            self.fp.close()
-            self.fp = None
-            self.wr = None
+def prepare_heading(heading, imu=None):
+    """两种视觉动作共用反馈来源和航向环初始化。"""
+    cfg = heading.cfg
+    gap_source = None
+    if cfg.rate_src == "gyro":
+        if imu is None:
+            raise RuntimeError("rate_src='gyro' 需要 IMU；请连接 IMU 或使用 'gap'")
+        source = ImuSource(imu)
+    elif cfg.rate_src == "gap":
+        gap_source = source = WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
+    else:
+        raise ValueError("rate_src 只能是 gap / gyro")
+    heading.attach_source(source)
+    heading.reset_run()
+    return HeadingCascade(cfg), gap_source
 
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
@@ -567,46 +481,14 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
 
         cfg = heading.cfg
         s_sign = straight_pid.FORWARD_SIGN
-        mmc = straight_pid.MM_PER_COUNT
         limit = straight_pid.SPEED_LIMIT
-
-        # 内环反馈来自电机里程差或 IMU 融合角速度。
-        gap_src = None
-        if cfg.rate_src == "gyro":
-            if imu is None:
-                raise RuntimeError("--rate-src gyro 需要 IMU；改用 --rate-src gap 或接上陀螺")
-            heading.attach_source(ImuSource(imu))
-        elif cfg.rate_src == "gap":
-            gap_src = WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
-            heading.attach_source(gap_src)
-        else:
-            raise ValueError("rate_src 只能是 gap / gyro")
-        loop = make_heading_loop(cfg)
-        loop.reset()
-        heading.reset_run()
-
-        # ---- 取基准计数（上电后 $MAll 是累计值，先读一次做零点）----
-        base, end = None, time.time() + 3.0
-        while base is None and time.time() < end:
-            check_cancel(stop_event)
-            totals, _ = board.feedback(0.1)
-            check_cancel(stop_event)
-            if totals is not None:
-                base = [totals[i] * s_sign[i] for i in range(4)]
-        if base is None:
-            raise RuntimeError("读不到编码器 $MAll：检查接线/供电，以及串口是不是驱动板")
-        base_l = (base[0] + base[1]) / 2.0
-        base_r = (base[2] + base[3]) / 2.0
-
-        def travel(totals):
-            return (((totals[0] * s_sign[0] + totals[1] * s_sign[1]) / 2.0 - base_l) * mmc,
-                    ((totals[2] * s_sign[2] + totals[3] * s_sign[3]) / 2.0 - base_r) * mmc)
+        loop, gap_src = prepare_heading(heading, imu)
+        wheels = WheelOdometry.read_origin(board, stop_event)
 
         spd_l = straight_pid.PID(straight_pid.KP_SPD, straight_pid.KI_SPD, 0.0,
                                  straight_pid.CORR_MAX)
         spd_r = straight_pid.PID(straight_pid.KP_SPD, straight_pid.KI_SPD, 0.0,
                                  straight_pid.CORR_MAX)
-        v_hist_l, v_hist_r = [], []
         pos_cmd = 0.0
         dist = gap = v_meas = trim = 0.0
         e_now = rate_now = e_max = trim_sum = 0.0
@@ -619,7 +501,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         t_data = t_prev                     # 最近一次收到编码器数据
         deadline = (t_start + max(10.0, 3.0 * goal_mm / max(cfg.speed, 1.0) + 5.0)
                     if goal_mm else float("inf"))
-        rl = _RunLog(log_path)
+        rl = CsvLog(log_path, LOG_COLUMNS)
 
         while True:
             check_cancel(stop_event)
@@ -639,21 +521,13 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             t_data = now
 
             # ---- 反馈：左右里程 / 进度 / 左右轮速（都来自编码器）----
-            d_l, d_r = travel(totals)
+            d_l, d_r = wheels.travel(totals)
             dist = (d_l + d_r) / 2.0
             gap = d_l - d_r
-            if tep is not None:
-                v_hist_l.append((tep[0] * s_sign[0] + tep[1] * s_sign[1]) / 2.0
-                                / straight_pid.TEP_WINDOW * mmc)
-                v_hist_r.append((tep[2] * s_sign[2] + tep[3] * s_sign[3]) / 2.0
-                                / straight_pid.TEP_WINDOW * mmc)
-                del v_hist_l[:-straight_pid.SPD_SAMPLES]
-                del v_hist_r[:-straight_pid.SPD_SAMPLES]
-            v_l = sum(v_hist_l) / len(v_hist_l) if v_hist_l else 0.0
-            v_r = sum(v_hist_r) / len(v_hist_r) if v_hist_r else 0.0
+            v_l, v_r = wheels.speed(tep)
             v_meas = (v_l + v_r) / 2.0
-            if gap_src is not None:                  # --rate-src gap 才用电机的里程差
-                gap_rate = gap_src.update(now, gap)
+            if gap_src is not None:                  # rate_src='gap' 才用电机的里程差
+                gap_src.update(now, gap)
 
             # ---- 航向反馈：视觉中心线 -> 角度误差 ----
             hd = heading.step(now)
@@ -673,7 +547,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 break
             if abs(hd.e) > cfg.max_dev:
                 reason = (f"视觉角度误差 {hd.e:+.1f}° 超过 {cfg.max_dev:.0f}°，已急停："
-                          f"方向可能接反（用 --dir-sign -1 反过来）或车被拨偏了")
+                          f"方向可能接反（用 config.py 的 dir_sign=-1 反过来）或车被拨偏了")
                 break
             if cfg.rate_src == "gyro" and imu.age() > IMU_STALE:
                 reason = f"IMU 数据中断 {imu.age():.2f}s，已急停"
@@ -689,11 +563,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                     e_now = 0.0
                 else:
                     e_now -= math.copysign(cfg.e_dead, e_now)
-            if cfg.rate_src == "gyro":
-                rate_raw, rate_ok = imu.yaw_rate, True
-            elif cfg.rate_src == "gap":
-                rate_raw, rate_ok = gap_rate, gap_src.valid
-            trim = loop.step(e_now, rate_raw, rate_ok, dt)
+            trim = loop.step(e_now, heading.src.rate, gap_src is None or gap_src.valid, dt)
             rate_now = loop.w_meas                  # 真正进了控制的那一路角速度
 
             # ---- ① 位置环（可选）：剩余距离 -> 目标线速度 ----
@@ -727,13 +597,14 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             trim_ff_sum += abs(loop.trim_ff) if math.isfinite(loop.trim_ff) else 0.0
             trim_n += 1
             trim_sat += 1 if abs(trim) >= 0.98 * cfg.trim_max else 0
-            rl.row(f"{now - t_start:.3f}", f"{dist:.1f}", f"{e_now:.3f}", f"{hd.e_raw:.3f}",
-                   f"{hd.lat_px:.1f}", "" if hd.head_deg is None else f"{hd.head_deg:.2f}",
-                   _num(loop.w_ref, ".2f"), _num(loop.w_meas, ".2f"),
-                   _num(loop.w_err, ".2f"), _num(loop.trim_ff, ".1f"),
-                   _num(loop.trim_fb, ".1f"), f"{trim:.1f}",
-                   f"{v_l:.1f}", f"{v_r:.1f}", f"{set_l:.0f}", f"{set_r:.0f}",
-                   f"{gap:.1f}", hd.src)
+            if log_path:
+                rl.row(f"{now - t_start:.3f}", f"{dist:.1f}", f"{e_now:.3f}", f"{hd.e_raw:.3f}",
+                       f"{hd.lat_px:.1f}", "" if hd.head_deg is None else f"{hd.head_deg:.2f}",
+                       format_number(loop.w_ref, ".2f"), format_number(loop.w_meas, ".2f"),
+                       format_number(loop.w_err, ".2f"), format_number(loop.trim_ff, ".1f"),
+                       format_number(loop.trim_fb, ".1f"), f"{trim:.1f}",
+                       f"{v_l:.1f}", f"{v_r:.1f}", f"{set_l:.0f}", f"{set_r:.0f}",
+                       f"{gap:.1f}", hd.src)
 
             if now - t_log > 0.5:                    # 半秒一行，盯直线性和视觉状态
                 t_log = now
@@ -762,7 +633,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             check_cancel(stop_event)
             if totals is None:
                 continue
-            d_l, d_r = travel(totals)
+            d_l, d_r = wheels.travel(totals)
             dist = (d_l + d_r) / 2.0
             gap = d_l - d_r
             still = still + 1 if abs(dist - prev) < 0.2 else 0
@@ -776,7 +647,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 "lost_max": lost_max, "gap_max": abs(gap),
                 "trim_avg": trim_sum / trim_n if trim_n else 0.0,
                 "trim_sat": 100.0 * trim_sat / trim_n if trim_n else 0.0,
-                "loop": loop.kind, "w_ref_max": w_ref_max,
+                "w_ref_max": w_ref_max,
                 "w_err_max": w_err_max if w_err_n else None,
                 "trim_ff_avg": trim_ff_sum / trim_n if trim_n else 0.0,
                 "log_path": log_path, "rate_src": cfg.rate_src, "imu": imu is not None}
@@ -789,27 +660,3 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         if rl is not None:
             actions.append(("视觉日志", rl.close))
         cleanup(*actions)
-
-
-def describe(info: dict) -> str:
-    """把诊断字典格式化成一行中文（和 straight_pid.describe 一个风格）。"""
-    if info.get("loop") == "cascade":
-        src_name = "电机 gap" if info.get("rate_src") == "gap" else "陀螺"
-        w_err = info.get("w_err_max")
-        extra = (f"；航向环双环：外环 ω 目标最大 {info['w_ref_max']:.1f}°/s，"
-                 f"内环（{src_name}）残差最大 "
-                 + ("—" if w_err is None else f"{w_err:.1f}°/s")
-                 + f"，前馈均值 {info['trim_ff_avg']:.0f}mm/s")
-    else:
-        extra = ""
-    if info.get("single"):
-        extra += f"；其中 {info['single']} 帧只有单侧边界（用半宽补齐中心线）"
-    if info.get("degraded"):
-        extra += f"；{info['degraded']} 帧只能按单侧相对角估计（诊断用）"
-    if info.get("lost_max", 0.0) > 0.01:
-        extra += f"；最长一次 {info['lost_max']:.2f}s 没有新边界"
-    if info.get("gated"):
-        extra += f"；{info['gated']} 帧的误差跳变被截断（关键点预测偶发跳变，已挡掉）"
-    return (f"最大角度误差 {info['e_max']:.2f}°，视觉基准为画幅中心，"
-            f"用了 {info['frames']} 帧边界；航向修正均值 {info['trim_avg']:.0f}mm/s、"
-            f"贴限幅 {info['trim_sat']:.0f}% 的时间{extra}")

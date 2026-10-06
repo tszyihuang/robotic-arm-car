@@ -12,8 +12,8 @@ from dataclasses import dataclass
 import math
 import time
 
-from .control import cleanup, check_cancel, wait_cancelable
-from config import BASE, TURN
+from .control import clamp, cleanup, check_cancel, wait_cancelable
+from config import TURN
 
 COUNTS_PER_METER = TURN["COUNTS_PER_METER"]
 LOOP_HZ = TURN["LOOP_HZ"]
@@ -26,13 +26,8 @@ PATH_KD = TURN["PATH_KD"]
 RATE_KP = TURN["RATE_KP"]
 WHEEL_SPEED_KP = TURN["WHEEL_SPEED_KP"]
 BRAKE_LEAD_SECONDS = TURN["BRAKE_LEAD_SECONDS"]
-BRAKE_KP = TURN["BRAKE_KP"]
 STOP_ANGLE = math.radians(TURN["STOP_ANGLE_DEG"])
 SETTLE_SECONDS = TURN["SETTLE_SECONDS"]
-
-
-def clamp(value, lo, hi):
-    return max(lo, min(hi, value))
 
 
 class WheelFeedback:
@@ -150,7 +145,7 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
                      max_speed=None, timeout_s=None, dry_run=False, track_width_m=0.41,
                      log_path=None, verbose=True, stop_event=None):
     """使用注入的电机和传感器接口执行转弯。干跑仅计算计划。"""
-    plan = make_plan(radius_m, degrees, 0.25 if cruise is None else cruise, max_speed, track_width_m)
+    plan = make_plan(radius_m, degrees, cruise, max_speed, track_width_m)
     check_cancel(stop_event)
     if timeout_s is not None and (not math.isfinite(timeout_s) or timeout_s <= 0):
         raise ValueError('转弯超时必须为正有限数值')
@@ -258,12 +253,13 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
                     check_cancel(stop_event)
                     board.speed(commands)
                 send_ms = (time.monotonic() - send_start) * 1000
-                rows.append([now - started, dt, 'brake' if plan.braking else 'run', travel,
-                             math.degrees(yaw), plan.v, plan.w, sum(speeds) / 4,
-                             rate,
-                             left, left, right, right, *speeds, *board.counts,
-                             age, imu.age() if imu else None, send_ms,
-                             *(round(v * 1000) for v in commands), *brake_pwm])
+                if log_file is not None:
+                    rows.append([now - started, dt, 'brake' if plan.braking else 'run', travel,
+                                 math.degrees(yaw), plan.v, plan.w, sum(speeds) / 4,
+                                 rate,
+                                 left, left, right, right, *speeds, *board.counts,
+                                 age, imu.age() if imu else None, send_ms,
+                                 *(round(v * 1000) for v in commands), *brake_pwm])
                 if plan.braking:
                     stopped = (span >= 0.08 and max(abs(v) for v in speeds) < 0.01
                                and abs(rate) < math.radians(2))

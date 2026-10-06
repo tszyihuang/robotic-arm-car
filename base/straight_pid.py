@@ -1,14 +1,13 @@
 """普通直走：位置 P、左右里程差 PID、轮速 PI；支持前进和倒退。"""
-import csv
 import math
 import time
 
-from .control import cleanup, check_cancel
+from .control import CsvLog, clamp, cleanup, check_cancel
+from .feedback import WheelOdometry
 from config import BASE, STRAIGHT
 
 __all__ = ["PID", "straight"]
 
-MM_PER_COUNT = BASE["meters_per_count"] * 1000
 FORWARD_SIGN = STRAIGHT["FORWARD_SIGN"]
 TRACK_MM = STRAIGHT["TRACK_MM"]
 SPEED_CRUISE = STRAIGHT["SPEED_CRUISE"]
@@ -26,12 +25,7 @@ KP_SPD = STRAIGHT["KP_SPD"]
 KI_SPD = STRAIGHT["KI_SPD"]
 CORR_MAX = STRAIGHT["CORR_MAX"]
 BRAKE_TAU = STRAIGHT["BRAKE_TAU"]
-TEP_WINDOW = STRAIGHT["TEP_WINDOW"]
-SPD_SAMPLES = STRAIGHT["SPD_SAMPLES"]
 FEEDBACK_STALE = BASE["feedback_stale"]
-
-def clamp(v, lo, hi):
-    return lo if v < lo else (hi if v > hi else v)
 
 
 class PID:
@@ -52,22 +46,6 @@ class PID:
         return clamp(out, -self.out_max, self.out_max)
 
 
-class _RunLog:
-    def __init__(self, path):
-        self.fp = open(path, "w", newline="", encoding="utf-8") if path else None
-        self.writer = csv.writer(self.fp) if self.fp else None
-        if self.writer:
-            self.writer.writerow(["t", "dist_mm", "gap_mm", "trim_mms", "v_l", "v_r", "set_l", "set_r"])
-
-    def row(self, *values):
-        if self.writer:
-            self.writer.writerow(values)
-
-    def close(self):
-        if self.fp:
-            self.fp.close()
-
-
 def straight(board, distance_mm, v_cruise, kp_gap=KP_GAP, ki_gap=KI_GAP,
              kd_gap=KD_GAP, log_path=None, log=print, stop_event=None):
     """返回沿行进方向的距离（mm，恒为正）与到位／故障诊断。"""
@@ -76,30 +54,15 @@ def straight(board, distance_mm, v_cruise, kp_gap=KP_GAP, ki_gap=KI_GAP,
         check_cancel(stop_event)
         direction = -1.0 if distance_mm < 0 else 1.0
         goal = abs(distance_mm)
-        base, deadline = None, time.monotonic() + 3.0
-        while base is None and time.monotonic() < deadline:
-            check_cancel(stop_event)
-            totals, _ = board.feedback(0.1)
-            check_cancel(stop_event)
-            if totals is not None:
-                base = [totals[i] * FORWARD_SIGN[i] for i in range(4)]
-        if base is None:
-            raise RuntimeError("读不到编码器 $MAll，请检查驱动板串口")
-        base_l, base_r = (base[0] + base[1]) / 2, (base[2] + base[3]) / 2
-
-        def travel(totals):
-            s = FORWARD_SIGN
-            return (((totals[0] * s[0] + totals[1] * s[1]) / 2 - base_l) * MM_PER_COUNT,
-                    ((totals[2] * s[2] + totals[3] * s[3]) / 2 - base_r) * MM_PER_COUNT)
+        wheels = WheelOdometry.read_origin(board, stop_event)
 
         head = PID(kp_gap, ki_gap, kd_gap, TRIM_MAX)
         spd_l, spd_r = PID(KP_SPD, KI_SPD, 0, CORR_MAX), PID(KP_SPD, KI_SPD, 0, CORR_MAX)
-        hist_l, hist_r = [], []
         pos_cmd = dist = gap = gap_max = 0.0
         t_start = t_prev = t_data = t_log = time.monotonic()
         deadline = t_start + max(10.0, 3.0 * goal / v_cruise + 5.0)
         reason = ""
-        run_log = _RunLog(log_path)
+        run_log = CsvLog(log_path, ["t", "dist_mm", "gap_mm", "trim_mms", "v_l", "v_r", "set_l", "set_r"])
         while True:
             check_cancel(stop_event)
             totals, steps = board.feedback()
@@ -116,17 +79,10 @@ def straight(board, distance_mm, v_cruise, kp_gap=KP_GAP, ki_gap=KI_GAP,
                     break
                 continue
             t_data = now
-            left, right = travel(totals)
+            left, right = wheels.travel(totals)
             dist, gap = direction * (left + right) / 2, left - right
             gap_max = max(gap_max, abs(gap))
-            if steps is not None:
-                s = FORWARD_SIGN
-                hist_l.append((steps[0] * s[0] + steps[1] * s[1]) / 2 / TEP_WINDOW * MM_PER_COUNT)
-                hist_r.append((steps[2] * s[2] + steps[3] * s[3]) / 2 / TEP_WINDOW * MM_PER_COUNT)
-                del hist_l[:-SPD_SAMPLES]
-                del hist_r[:-SPD_SAMPLES]
-            v_l = sum(hist_l) / len(hist_l) if hist_l else 0.0
-            v_r = sum(hist_r) / len(hist_r) if hist_r else 0.0
+            v_l, v_r = wheels.speed(steps)
             if abs(gap) > GAP_DEV_MAX:
                 reason = "左右里程差发散，已停车"
                 break
@@ -157,7 +113,7 @@ def straight(board, distance_mm, v_cruise, kp_gap=KP_GAP, ki_gap=KI_GAP,
             check_cancel(stop_event)
             if totals is None:
                 continue
-            left, right = travel(totals)
+            left, right = wheels.travel(totals)
             dist, gap = direction * (left + right) / 2, left - right
             gap_max = max(gap_max, abs(gap))
             still = still + 1 if abs(dist - previous) < 0.2 else 0

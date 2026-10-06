@@ -2,13 +2,11 @@
 
 import math
 from copy import deepcopy
-from config import ARM
 from pathlib import Path
 
+from config import ARM
+
 JOINT_IDS = (1, 2, 3, 4)
-GRIPPER_SERVO_ID = ARM["gripper_servo_id"]
-GRIPPER_OPEN_ANGLE = ARM["gripper_open_angle_deg"]
-GRIPPER_CLOSE_ANGLE = ARM["gripper_close_angle_deg"]
 
 
 def finite(value, name):
@@ -26,9 +24,9 @@ class ArmConfig:
             raise ValueError(f"未知机械臂参数：{sorted(unknown)}")
         self.__dict__.update(deepcopy(ARM))
         self.__dict__.update(overrides)
-        self.__post_init__()
+        self._validate()
 
-    def __post_init__(self):
+    def _validate(self):
         if not isinstance(self.port, str) or not self.port:
             raise ValueError("port 不能为空")
         if isinstance(self.baudrate, bool) or not isinstance(self.baudrate, int) or self.baudrate <= 0:

@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from config import SENSOR, POSITION
 
 import serial
-from base.control import MotionCancelled, check_cancel
-from base.control import cleanup
+from base.control import MotionCancelled, check_cancel, clamp, cleanup
 
 H1, H2 = 0x7E, 0x23
 FUNC_QUAT, FUNC_RAW = 0x16, 0x04
@@ -24,10 +23,6 @@ MAX_YAW_RATE = SENSOR["MAX_YAW_RATE"]
 MIN_YAW_STEP = SENSOR["MIN_YAW_STEP"]
 MAX_YAW_STEP = SENSOR["MAX_YAW_STEP"]
 GLITCH_HOLD = SENSOR["GLITCH_HOLD"]
-
-def clamp(v, lo, hi):
-    return lo if v < lo else (hi if v > hi else v)
-
 
 def build_frame(func, *params):
     """按协议打包一帧：[7E][23][LEN][FUNC][DATA...][CHK]，LEN=整帧字节数。"""

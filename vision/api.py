@@ -5,34 +5,10 @@ import time
 
 from config import VISION
 from base.control import check_cancel, cleanup, MotionCancelled
-from base.vision_straight import BoundarySample
+from .boundary import BoundarySample, valid_geometry
 from .camera import CameraStream
 from .qrcode import scan_qrcode
-from .targets import observe
-from .targets import LABELS
-
-
-def valid_geometry(info):
-    if not isinstance(info, dict):
-        return False
-    def finite(value):
-        return type(value) in (float, int) and math.isfinite(value)
-    size = info.get("size")
-    if size is not None and (not isinstance(size, (tuple, list)) or len(size) != 2
-                             or any(not finite(v) or v < 1 or int(v) != v for v in size)):
-        return False
-    found = False
-    for name in ("left", "right"):
-        side = info.get(name)
-        if side is None:
-            continue
-        if not isinstance(side, dict) or not all(finite(side.get(k)) for k in ("a", "b")):
-            return False
-        for key in ("near_y", "far_y", "stop_row", "angle_deg", "confidence"):
-            if side.get(key) is not None and not finite(side[key]):
-                return False
-        found = True
-    return found
+from .targets import LABELS, observe
 
 
 class Vision:

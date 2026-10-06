@@ -1,7 +1,8 @@
 import unittest
 import threading
 from vision.api import Vision
-from base.vision_straight import BoundarySample, VisionCfg, track_view
+from base.vision_straight import VisionCfg, track_view
+from vision.boundary import BoundarySample
 
 def boundary(index=1, stamp=100.0, *, info=None, state="ready", error="", inference_ms=40.0):
     if info is None:

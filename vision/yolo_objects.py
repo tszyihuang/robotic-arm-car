@@ -1,75 +1,19 @@
 """YOLO 物体检测：BGR 原始画面输入，原图坐标的检测框输出。"""
 from __future__ import annotations
 
-import math
-from pathlib import Path
-import time
-
 import numpy as np
-import torch
-from ultralytics import YOLO
-from ultralytics.utils.checks import check_imgsz
 
 from config import VISION
-from .boundary_config import read_args
+from .yolo import YoloPredictor, read_args
 
 
-class ObjectPredictor:
+class ObjectPredictor(YoloPredictor):
     def __init__(self, weights=VISION["objects_weights"], device=VISION["infer_device"], fp16=VISION["fp16"],
                  threshold=None, args_path=VISION["objects_args"]):
-        weights = Path(weights).resolve()
-        if not weights.is_file():
-            raise FileNotFoundError(f"找不到 YOLO 权重文件 {weights}")
-        args = read_args(args_path, task="detect")
-        self.threshold = threshold if threshold is not None else args.get("conf")
-        if self.threshold is None:
-            self.threshold = 0.25
-        if self.threshold is None:
-            self.threshold = 0.25
-        if not math.isfinite(self.threshold) or not 0 < self.threshold < 1:
-            raise ValueError("YOLO confidence threshold must be between 0 and 1")
-        iou = args.get("iou", 0.7)
-        if not math.isfinite(iou) or not 0 < iou <= 1:
-            raise ValueError("YOLO IoU threshold must be between 0 and 1")
-        imgsz = args.get("imgsz", 640)
-        dims = [imgsz] if isinstance(imgsz, int) else imgsz
-        if (not isinstance(dims, list) or len(dims) not in (1, 2)
-                or any(type(value) is not int or value <= 0 for value in dims)):
-            raise ValueError("YOLO imgsz must be a positive integer or [height, width]")
-        max_det = args.get("max_det", 300)
-        if type(max_det) is not int or max_det < 1:
-            raise ValueError("YOLO max_det must be a positive integer")
-        self.device = torch.device(device)
-        if self.device.type == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA is unavailable; install matching PyTorch or use device='cpu'.")
-        self.fp16 = bool(fp16 and self.device.type == "cuda")
-        self.model = YOLO(str(weights), task="detect")
-        if self.model.task != "detect":
-            raise ValueError("Expected a YOLO detection checkpoint")
+        super().__init__(weights, device, fp16, threshold, read_args(args_path, "detect"), "detect")
         self.names = dict(self.model.names)
-        self.imgsz = check_imgsz(imgsz, stride=int(self.model.model.stride.max()), min_dim=2)
-        self.config = {"imgsz": self.imgsz, "conf": self.threshold, "iou": iou,
-                       "max_det": max_det, "names": self.names}
 
-    def _run(self, frame):
-        return self.model.predict(
-            source=frame, imgsz=self.imgsz, conf=self.threshold, iou=self.config["iou"],
-            max_det=self.config["max_det"], device=str(self.device),
-            quantize="fp16" if self.fp16 else None,
-            rect=True, save=False, verbose=False,
-        )[0]
-
-    def warmup(self, count=5):
-        frame = np.zeros((*self.imgsz, 3), dtype=np.uint8)
-        for _ in range(count):
-            self._run(frame)
-
-    def predict(self, frame):
-        if (not isinstance(frame, np.ndarray) or frame.dtype != np.uint8
-                or frame.ndim != 3 or frame.shape[2] != 3 or 0 in frame.shape):
-            raise ValueError("Expected a nonempty uint8 BGR HxWx3 frame")
-        start = time.perf_counter()
-        result = self._run(frame)
+    def _decode(self, result, size):
         detections = []
         if result.boxes is not None:
             for box in result.boxes.data.cpu().numpy():
@@ -82,11 +26,4 @@ class ObjectPredictor:
                     continue
                 detections.append({"class_id": class_id, "name": self.names[class_id],
                                    "confidence": confidence, "box": xyxy.tolist()})
-        height, width = frame.shape[:2]
-        speed = result.speed
-        return {"size": [width, height], "coordinate_units": "original_image_pixels",
-                "detections": detections,
-                "timing_ms": {"preprocess": float(speed.get("preprocess") or 0),
-                              "network": float(speed.get("inference") or 0),
-                              "postprocess": float(speed.get("postprocess") or 0),
-                              "total": (time.perf_counter() - start) * 1000}}
+        return {"detections": detections}

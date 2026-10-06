@@ -2,10 +2,10 @@ import math
 from pathlib import Path
 import tempfile
 import time
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch, call
 from base import vision_align as va, vision_straight as vs
+from vision.boundary import BoundarySample
 
 def heading():
     def edge(x):
@@ -13,7 +13,7 @@ def heading():
                 'bottom_x': x, 'far_x': x, 'confidence': 1.0}
     info = {'size': [1280, 720], 'left': edge(340), 'right': edge(940), 'predict_ms': 0.0}
     cam = Mock()
-    cam.sample.return_value = vs.BoundarySample(info, 1, 1, 'ready', '', time.time(), time.time())
+    cam.sample.return_value = BoundarySample(info, 1, 1, 'ready', '', time.time(), time.time())
     cam.age.return_value = 0
     return vs.VisionHeading(vs.VisionCfg(rate_src='gap'), cam)
 
@@ -55,7 +55,7 @@ class VisionControlTests(unittest.TestCase):
             board = Mock()
             board.feedback.side_effect = [([0]*4, None), ([1000]*4, None), OSError('disconnected')]
             run_log = Mock()
-            with patch.object(vs, '_RunLog', return_value=run_log), self.assertRaises(OSError):
+            with patch.object(vs, 'CsvLog', return_value=run_log), self.assertRaises(OSError):
                 vs.vision_straight(board, heading(), goal_mm=100, log=lambda _: None)
             run_log.close.assert_called_once()
             self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
@@ -68,6 +68,50 @@ class VisionControlTests(unittest.TestCase):
                     with self.assertRaises(KeyboardInterrupt):
                         action(board, heading(), log=lambda _: None)
                     self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
+
+    def test_log_open_failure_stops_both_control_loops(self):
+        for action in (vs.vision_straight, va.vision_align):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as folder:
+                board = Mock()
+                board.feedback.return_value = ([0] * 4, None)
+                path = Path(folder) / 'missing' / 'motion.csv'
+                with self.assertRaises(FileNotFoundError):
+                    action(board, heading(), log_path=path, log=lambda _: None)
+                self.assertEqual(board.spd.call_args_list, [call(0, 0, 0, 0)])
+
+    def test_gyro_feedback_preserves_turn_direction_in_both_loops(self):
+        for action in (vs.vision_straight, va.vision_align):
+            with self.subTest(action=action):
+                hd = heading()
+                hd.cfg.rate_src = 'gyro'
+                hd.cam.sample().info['left']['b'] += 20
+                hd.cam.sample().info['right']['b'] += 20
+                imu = Mock(yaw=0.0, yaw_rate=-1.0)
+                imu.age.return_value = 0
+                board = Mock()
+                board.feedback.side_effect = [([0] * 4, None), ([10] * 4, None),
+                                              *[([1000] * 4, None)] * 4]
+                if action is vs.vision_straight:
+                    _, info = action(board, hd, imu=imu, goal_mm=100, log=lambda _: None)
+                    self.assertFalse(info['reason'])
+                else:
+                    info = action(board, hd, va.AlignCfg(settle=0, tol=20),
+                                  imu=imu, log=lambda _: None)
+                    self.assertTrue(info['ok'])
+                left, _, right, _ = board.spd.call_args_list[0].args
+                self.assertGreater(left, right)
+                self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
+
+    def test_stale_gyro_stops_before_sending_motion(self):
+        hd = heading()
+        hd.cfg.rate_src = 'gyro'
+        imu = Mock(yaw=0.0, yaw_rate=0.0)
+        imu.age.return_value = vs.IMU_STALE + 0.1
+        board = Mock()
+        board.feedback.return_value = ([0] * 4, None)
+        _, info = vs.vision_straight(board, hd, imu=imu, goal_mm=100, log=lambda _: None)
+        self.assertIn('IMU 数据中断', info['reason'])
+        self.assertEqual(board.spd.call_args_list, [call(0, 0, 0, 0)])
 
 class VanishingGeometryTests(unittest.TestCase):
     def test_intersection_outside_image_is_used_without_clamping(self):
@@ -156,7 +200,7 @@ def lane(vp_x=640.0, vp_y=50.0, left_a=-0.5, right_a=0.5):
 def camera(info):
     cam = Mock()
     def update(info, frames, state, now):
-        cam.sample.return_value = vs.BoundarySample(info, frames, frames, state, '', now, now)
+        cam.sample.return_value = BoundarySample(info, frames, frames, state, '', now, now)
     cam.update.side_effect = update
     cam.age.side_effect = lambda now=None: (time.time() if now is None else now) - cam.sample().t_valid
     cam.update(info, frames=1, state="ready", now=10.0)

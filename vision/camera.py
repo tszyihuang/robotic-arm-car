@@ -2,9 +2,8 @@
 import threading
 import time
 
-from base.control import check_cancel
+from base.control import check_cancel, cleanup
 from config import VISION
-from base.control import cleanup
 
 
 def normalize_device(device):

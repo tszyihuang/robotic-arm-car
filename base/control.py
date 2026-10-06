@@ -1,6 +1,39 @@
 """动作取消、可中断等待，以及逐项清理。"""
+import csv
+import math
 import sys
 import time
+
+
+def clamp(value, lower, upper):
+    return lower if value < lower else upper if value > upper else value
+
+
+def format_number(value, spec=".1f"):
+    return "" if value is None or not math.isfinite(value) else format(value, spec)
+
+
+class CsvLog:
+    """可选的逐拍日志；无路径时不打开文件，关闭可重复调用。"""
+
+    def __init__(self, path, columns):
+        self.file = open(path, "w", newline="", encoding="utf-8") if path else None
+        self.writer = csv.writer(self.file) if self.file else None
+        try:
+            if self.writer is not None:
+                self.writer.writerow(columns)
+        except BaseException:
+            cleanup(("日志文件", self.close))
+            raise
+
+    def row(self, *values):
+        if self.writer is not None:
+            self.writer.writerow(values)
+
+    def close(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = self.writer = None
 
 
 class MotionCancelled(RuntimeError):

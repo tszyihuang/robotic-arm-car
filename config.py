@@ -44,7 +44,7 @@ POSITION = {
 
 VISION_CONTROL = {
     "FRAME_W": 1280, "FRAME_H": 720, "LOOKAHEAD": 0.5, "FOV_DEG": 70.0,
-    "RATE_TAU": 0.2, "RATE_MAX": 60.0, "E_TAU": 0.12, "E_GATE": 10.0,
+    "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,
     "KP_YAW": 10.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
@@ -53,12 +53,11 @@ VISION_CONTROL = {
 }
 
 ALIGN = {
+    # 航向环增益共用 VISION_CONTROL；这里只配置对正参考、速度和停车条件。
     "REF": "e", "REF_TAU": 0.35, "REF_GATE": 8.0, "BIAS": 0.0,
     "SPIN_SPEED": 150.0, "MIN_U": 0.0, "TOL": 2.0, "RATE_TOL": 8.0,
     "SETTLE": 0.4, "TIMEOUT": 20.0, "MAX_ROT": 90.0, "MAX_DEV": 60.0,
     "DIVERGE": 12.0, "LOOP_HZ": 100.0, "PRINT_INTERVAL": 0.5,
-    "KP": 4.0, "KI": 0.0, "W_MAX": 40.0, "KP_RATE": 4.0, "KI_RATE": 0.0,
-    "KFF": 1.0,
 }
 
 ARM = {

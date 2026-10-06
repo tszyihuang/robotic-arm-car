@@ -13,6 +13,7 @@ from base import straight_pid, arc_turn, calibrate_position
 from sensor.imu import ImuLink, FUNC_RAW, FUNC_QUAT
 from vision.api import Vision
 from base.control import MotionCancelled
+from config import TURN
 from tasks import pause
 
 
@@ -116,6 +117,13 @@ class EncoderTests(unittest.TestCase):
                                      b"10,11,12#", b""]
         self.assertEqual(board.feedback(0.01), ([1, 2, 3, 4], [5, 6, 7, 8]))
         self.assertEqual(board.feedback(0.01), ([9, 10, 11, 12], None))
+
+    def test_brake_uses_config_and_limits_pwm_in_both_directions(self):
+        self.motor.pwm = Mock()
+        with patch.dict(TURN, BRAKE_KP=2000.0):
+            duties = self.motor.brake((1.0, -0.03, 0.01, -1.0))
+        self.assertEqual(duties, (-1000, 60, 0, 1000))
+        self.motor.pwm.assert_called_once_with(duties)
 
 
 class ImuTests(unittest.TestCase):

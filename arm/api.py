@@ -37,7 +37,7 @@ class Arm:
     def _ensure_servo(self):
         with self._connection_lock:
             if self._servo is None and self._arm is not None:
-                self._servo = self._arm._gripper
+                self._servo = self._arm._connect_gripper()
             if self._servo is None:
                 from .servo import FeetechSTSServo
                 config = self.config
@@ -103,16 +103,18 @@ class Arm:
             if self._arm is None:
                 from .controller import Arm as JointController
 
-                options = {'simulate': self._simulate, 'bus': self._ensure_bus()}
-                # 若此前单独操作夹爪，统一驱动共用该连接，避免重复打开 TTL 串口。
                 with self._connection_lock:
-                    if self._servo is not None:
-                        options["gripper"] = self._servo
-                    self._arm = JointController(self.config, **options)
+                    bus = self._ensure_bus()
+                    try:
+                        self._arm = JointController(self.config, simulate=self._simulate,
+                                                    bus=bus, gripper=self._servo, stop_event=event)
+                    except BaseException:
+                        # 构造失败会关闭已注入的连接，下次校准需重新建立。
+                        self._bus = self._servo = None
+                        raise
             else:
                 self._initial_joints = None
-                options = {} if event is None else {"stop_event": event}
-                self._arm.calibrate_zero(**options)
+                self._arm.calibrate_zero(stop_event=event)
             check_cancel(event)
             self._initial_joints = dict(self._arm.config.joint_offsets_deg)
         except MotionCancelled:
@@ -132,54 +134,32 @@ class Arm:
             raise RuntimeError("机械臂未校准，请先执行 arm-calibrate")
         return self._arm
 
-    def move_joints(self, q1, q2, q3, q4, gripper=None, *, stop_event=None):
+    def _move(self, joints, gripper, stop_event):
         arm = self._require_calibrated()
         event = self._event(stop_event)
-        options = {"wait": True, "order": "together"}
-        if gripper is not None:
-            arm._gripper = self._ensure_servo()
-            options["gripper"] = gripper
-        if event is not None:
-            options["stop_event"] = event
         try:
             check_cancel(event)
-            arm.move_joints(dict(enumerate((q1, q2, q3, q4), start=1)), **options)
+            if gripper is not None:
+                arm._gripper = self._ensure_servo()
+            arm.move_joints(joints, gripper=gripper, stop_event=event)
             check_cancel(event)
         except BaseException:
             self._stop_after_error()
             raise
         return {"ok": True}
 
+    def move_joints(self, q1, q2, q3, q4, gripper=None, *, stop_event=None):
+        return self._move(dict(enumerate((q1, q2, q3, q4), start=1)), gripper, stop_event)
+
     def home(self, *, stop_event=None):
-        arm = self._require_calibrated()
-        event = self._event(stop_event)
-        options = {"wait": True, "order": "together"}
-        if event is not None:
-            options["stop_event"] = event
-        try:
-            check_cancel(event)
-            arm.move_joints(self._initial_joints, **options)
-            check_cancel(event)
-        except BaseException:
-            self._stop_after_error()
-            raise
-        return {"ok": True}
+        return self._move(self._initial_joints, None, stop_event)
 
     def disable(self):
         if self._arm is not None:
             self._arm.disable(include_gripper=False)
         else:
             # 独立失能只发送 RS485 停止指令，不依赖校准或编码器反馈。
-            from .motor import MotorBus, SimulatedBus
-
-            config = self.config
-            bus = SimulatedBus(config) if self._simulate else MotorBus(
-                config.port, config.baudrate, config.serial_timeout,
-                latency_ms=config.serial_latency_ms)
-            try:
-                bus.disable_all()
-            finally:
-                bus.close(disable_motors=False)
+            self._ensure_bus().disable_all()
         print("  机械臂 ID1-4 已失能")
         return {"ok": True}
 
@@ -194,14 +174,7 @@ class Arm:
         event = self._event(stop_event)
         check_cancel(event)
         try:
-            if self._arm is not None:
-                with self._connection_lock:
-                    if self._servo is not None:
-                        self._arm._gripper = self._servo
-                    servo = self._arm._connect_gripper()
-                    self._servo = servo
-            else:
-                servo = self._ensure_servo()
+            servo = self._ensure_servo()
             check_cancel(event)
             servo.move_angle(angle, wait=False)
             check_cancel(event)
@@ -228,6 +201,6 @@ class Arm:
             actions.append(("四轴串口", lambda: arm.close(disable_motors=False)))
         elif bus is not None:
             actions.append(("四轴串口", lambda: bus.close(disable_motors=False)))
-        if servo is not None:
+        if servo is not None and (arm is None or servo is not arm._gripper):
             actions.append(("舵机串口", servo.close))
         cleanup(*actions)

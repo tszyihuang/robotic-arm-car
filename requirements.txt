@@ -1,0 +1,9 @@
+# 保留已经匹配的 OpenCV、PyTorch、torchvision 和 CUDA 环境。
+pyserial>=3.5,<4
+numpy>=1.26,<3
+PyYAML>=6,<7
+opencv-python>=4.11,<5
+torch>=2
+torchvision>=0.15
+# 推理接口已在此版本验证。
+ultralytics==8.4.164

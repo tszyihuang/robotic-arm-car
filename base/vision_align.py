@@ -1,49 +1,23 @@
 """原地视觉对正：与视觉直走共享中心线和航向双环。"""
 from __future__ import annotations
 
-import csv
 import math
 import time
 from dataclasses import dataclass
 
 from . import straight_pid
 from config import BASE, ALIGN
+from .control import CsvLog, clamp, cleanup, check_cancel, format_number
+from .feedback import WheelOdometry
+from .vision_straight import VisionHeading, prepare_heading
+
 IMU_STALE = BASE["feedback_stale"]
-from .control import cleanup, check_cancel
-from .vision_straight import (ImuSource, VisionHeading, WheelGapSource,
-                             clamp, make_heading_loop)
-
-# ============================== 默认参数 ==============================
-
-REF = ALIGN["REF"]
-REF_TAU = ALIGN["REF_TAU"]
-REF_GATE = ALIGN["REF_GATE"]
-BIAS = ALIGN["BIAS"]
-
-SPIN_SPEED = ALIGN["SPIN_SPEED"]
-MIN_U = ALIGN["MIN_U"]
-TOL = ALIGN["TOL"]
-RATE_TOL = ALIGN["RATE_TOL"]
-SETTLE = ALIGN["SETTLE"]
-TIMEOUT = ALIGN["TIMEOUT"]
-MAX_ROT = ALIGN["MAX_ROT"]
-MAX_DEV = ALIGN["MAX_DEV"]
-DIVERGE = ALIGN["DIVERGE"]
-LOOP_HZ = ALIGN["LOOP_HZ"]
-PRINT_INTERVAL = ALIGN["PRINT_INTERVAL"]
-
-KP = ALIGN["KP"]
-KI = ALIGN["KI"]
-W_MAX = ALIGN["W_MAX"]
-KP_RATE = ALIGN["KP_RATE"]
-KI_RATE = ALIGN["KI_RATE"]
-KFF = ALIGN["KFF"]
 
 
 class RefPicker:
-    """把 --ref 选的量折成'要往左修多少度'，并跟着 VisionHeading 的外推走。"""
+    """把 ref 选的量折成'要往左修多少度'，并跟着 VisionHeading 的外推走。"""
 
-    def __init__(self, ref: str = REF, tau: float = REF_TAU, gate: float = REF_GATE):
+    def __init__(self, ref: str = ALIGN["REF"], tau: float = ALIGN["REF_TAU"], gate: float = ALIGN["REF_GATE"]):
         self.ref = ref
         self.tau = max(float(tau), 0.0)
         self.gate = max(float(gate), 0.0)
@@ -51,10 +25,6 @@ class RefPicker:
         self._target = 0.0
         self.n_gated = 0
         self.n_fallback = 0       # head 拿不到（单侧）的次数
-
-    def reset(self) -> None:
-        self.delta = self._target = 0.0
-        self.n_gated = self.n_fallback = 0
 
     def _raw(self, view) -> float | None:
         """本帧 head / mid 相对 e 的差；这个量本身已经按"往左修为正"折算过。"""
@@ -81,7 +51,7 @@ class RefPicker:
         return self.delta
 
     def err(self, hd) -> float:
-        """本拍的参考角误差（+ = 中心线在左边 = 要往左修；未乘 vision_dir_sign）。"""
+        """本拍的参考角误差（+ = 中心线在左边 = 要往左修；未乘 dir_sign）。"""
         return hd.e + self.delta
 
 
@@ -89,19 +59,19 @@ class RefPicker:
 class AlignCfg:
     """原地校准自己的参数（航向环增益那些在 VisionCfg 里，和走直线共用一份）。"""
 
-    ref: str = REF
-    ref_tau: float = REF_TAU
-    ref_gate: float = REF_GATE
-    bias: float = BIAS
-    spin_speed: float = SPIN_SPEED
-    min_u: float = MIN_U
-    tol: float = TOL
-    rate_tol: float = RATE_TOL
-    settle: float = SETTLE
-    timeout: float = TIMEOUT
-    max_rot: float = MAX_ROT
-    max_dev: float = MAX_DEV
-    diverge: float = DIVERGE
+    ref: str = ALIGN["REF"]
+    ref_tau: float = ALIGN["REF_TAU"]
+    ref_gate: float = ALIGN["REF_GATE"]
+    bias: float = ALIGN["BIAS"]
+    spin_speed: float = ALIGN["SPIN_SPEED"]
+    min_u: float = ALIGN["MIN_U"]
+    tol: float = ALIGN["TOL"]
+    rate_tol: float = ALIGN["RATE_TOL"]
+    settle: float = ALIGN["SETTLE"]
+    timeout: float = ALIGN["TIMEOUT"]
+    max_rot: float = ALIGN["MAX_ROT"]
+    max_dev: float = ALIGN["MAX_DEV"]
+    diverge: float = ALIGN["DIVERGE"]
 
     def __post_init__(self):
         if self.ref not in ("e", "head", "mid"):
@@ -122,29 +92,6 @@ class AlignCfg:
 LOG_COLUMNS = ['t', 'err_deg', 'e_deg', 'head_deg', 'mid_deg', 'w_ref_dps', 'w_meas_dps', 'w_err_dps', 'trim_ff', 'trim_fb', 'trim_mms', 'cmd_l', 'cmd_r', 'gap_mm', 'rot_deg', 'src']
 
 
-class _AlignLog:
-    """逐拍写 CSV（不给路径就是空操作）。"""
-
-    def __init__(self, path):
-        self.fp = open(path, "w", newline="") if path else None
-        self.wr = csv.writer(self.fp) if self.fp else None
-        if self.wr:
-            self.wr.writerow(LOG_COLUMNS)
-
-    def row(self, *vals) -> None:
-        if self.wr:
-            self.wr.writerow(vals)
-
-    def close(self) -> None:
-        if self.fp:
-            self.fp.close()
-            self.fp = None
-            self.wr = None
-
-def _num(v, fmt=".1f") -> str:
-    return "" if v is None or not math.isfinite(v) else format(v, fmt)
-
-
 def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None,
                  log=print, log_path=None, stop_event=None):
     """原地把车头转到跑道中心线方向，返回诊断字典。"""
@@ -155,44 +102,13 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
         align = align or AlignCfg()
         cfg = heading.cfg
         fwd = straight_pid.FORWARD_SIGN
-        mmc = straight_pid.MM_PER_COUNT
-
-        # 与视觉直走共享航向双环。
-        gap_src = None
-        if cfg.rate_src == "gyro":
-            if imu is None:
-                raise RuntimeError("--rate-src gyro 需要 IMU；改用 --rate-src gap")
-            heading.attach_source(ImuSource(imu))
-        elif cfg.rate_src == "gap":
-            gap_src = WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
-            heading.attach_source(gap_src)
-        else:
-            raise ValueError("rate_src 只能是 gap / gyro")
-        loop = make_heading_loop(cfg)
-        loop.reset()
-        heading.reset_run()
+        loop, gap_src = prepare_heading(heading, imu)
         picker = RefPicker(align.ref, align.ref_tau, align.ref_gate)
+        wheels = WheelOdometry.read_origin(board, stop_event)
 
-        # ---- 取基准计数（$MAll 是累计值，先读一次当零点）----
-        base, end = None, time.time() + 3.0
-        while base is None and time.time() < end:
-            check_cancel(stop_event)
-            totals, _ = board.feedback(0.1)
-            check_cancel(stop_event)
-            if totals is not None:
-                base = [totals[i] * fwd[i] for i in range(4)]
-        if base is None:
-            raise RuntimeError("读不到编码器 $MAll：检查接线/供电，以及串口是不是驱动板")
-        base_l = (base[0] + base[1]) / 2.0
-        base_r = (base[2] + base[3]) / 2.0
-
-        def travel(totals):
-            return (((totals[0] * fwd[0] + totals[1] * fwd[1]) / 2.0 - base_l) * mmc,
-                    ((totals[2] * fwd[2] + totals[3] * fwd[3]) / 2.0 - base_r) * mmc)
-
-        settle_n = max(1, int(round(align.settle * LOOP_HZ)))
+        settle_n = max(1, int(round(align.settle * ALIGN["LOOP_HZ"])))
         yaw0 = float(imu.yaw) if imu is not None else None
-        rl = _AlignLog(log_path)
+        rl = CsvLog(log_path, LOG_COLUMNS)
         t_start = t_prev = t_log = time.time()
         t_warn = 0.0
         t_data = t_prev
@@ -237,7 +153,7 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
             t_data = now
 
             # ---- 反馈：左右里程 / 里程差（内环要用的角速度从这来）----
-            d_l, d_r = travel(totals)
+            d_l, d_r = wheels.travel(totals)
             gap = d_l - d_r
             rot = -math.degrees(gap / max(cfg.track_mm, 1e-3))   # 左转为正
             if gap_src is not None:
@@ -271,7 +187,7 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
                     log(f"  ! 保持不动：{why}")
                 continue
 
-            # ---- 参考角误差：--ref 选量 + 低通/外推 + --bias ----
+            # ---- 参考角误差：ref 选量 + 低通/外推 + bias ----
             picker.update(view, dt, hd.new)
             raw_now = picker.err(hd) - align.bias       # + = 要往左修
             e_now = cfg.dir_sign * raw_now
@@ -287,23 +203,19 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
                           f"视觉在乱跳（检查摄像头画面），或者车根本不在跑道上")
                 break
             if abs(e_now) > abs(err0) + align.diverge:
-                fix = ("加上 vision_dir_sign -1" if cfg.dir_sign > 0
-                       else "去掉 vision_dir_sign（改回 +1）")
+                fix = ("设置 config.py 的 dir_sign=-1" if cfg.dir_sign > 0
+                       else "设置 config.py 的 dir_sign=+1")
                 reason = (f"误差从 {err0:+.1f}° 发散到 {e_now:+.1f}°，已急停："
                           f"方向多半接反了：{fix}，或车被外力拨动")
                 break
             if imu is not None and abs(imu.yaw - yaw0) > align.max_rot:
                 reason = (f"已经转了 {abs(imu.yaw - yaw0):.0f}°，超过上限 "
                           f"{align.max_rot:.0f}° 还没锁住，已停车：检查 align ref / "
-                          f"vision_dir_sign，或车头是不是反着放的")
+                          f"dir_sign，或车头是不是反着放的")
                 break
 
             # ---- ② 航向环：角度误差 -> 目标角速度 -> 差动 ----
-            if cfg.rate_src == "gyro":
-                rate_raw, rate_ok = imu.yaw_rate, True
-            elif cfg.rate_src == "gap":
-                rate_raw, rate_ok = gap_src.rate, gap_src.valid
-            trim = loop.step(e_now, rate_raw, rate_ok, dt)
+            trim = loop.step(e_now, heading.src.rate, gap_src is None or gap_src.valid, dt)
             n_ctrl += 1
             in_band = abs(e_now) <= align.tol and abs(loop.w_meas) <= align.rate_tol
             u = trim
@@ -319,14 +231,15 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
             if math.isfinite(loop.w_ref):
                 w_ref_max = max(w_ref_max, abs(loop.w_ref))
             trim_sum += abs(u)
-            rl.row(f"{now - t_start:.3f}", f"{e_now:.3f}", f"{hd.e:.3f}",
-                   _num(head_now, ".3f"), _num(mid_now, ".3f"),
-                   _num(loop.w_ref, ".2f"), _num(loop.w_meas, ".2f"),
-                   _num(loop.w_err, ".2f"), _num(loop.trim_ff, ".1f"),
-                   _num(loop.trim_fb, ".1f"), f"{u:.1f}", f"{-u:.0f}", f"{u:.0f}",
-                   f"{gap:.1f}", f"{rot:.1f}", view.src)
+            if log_path:
+                rl.row(f"{now - t_start:.3f}", f"{e_now:.3f}", f"{hd.e:.3f}",
+                       format_number(head_now, ".3f"), format_number(mid_now, ".3f"),
+                       format_number(loop.w_ref, ".2f"), format_number(loop.w_meas, ".2f"),
+                       format_number(loop.w_err, ".2f"), format_number(loop.trim_ff, ".1f"),
+                       format_number(loop.trim_fb, ".1f"), f"{u:.1f}", f"{-u:.0f}", f"{u:.0f}",
+                       f"{gap:.1f}", f"{rot:.1f}", view.src)
 
-            if now - t_log > PRINT_INTERVAL:
+            if now - t_log > ALIGN["PRINT_INTERVAL"]:
                 t_log = now
                 w_txt = (f"{loop.w_ref:+5.1f}/{loop.w_meas:+5.1f}"
                          if math.isfinite(loop.w_ref) else f"  —  /{loop.w_meas:+5.1f}")
@@ -355,7 +268,7 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
             check_cancel(stop_event)
             if totals is None:
                 continue
-            d_l, d_r = travel(totals)
+            d_l, d_r = wheels.travel(totals)
             gap = d_l - d_r
             rot = -math.degrees(gap / max(cfg.track_mm, 1e-3))
             quiet = quiet + 1 if abs(rot - prev) < 0.1 else 0
@@ -390,22 +303,3 @@ def vision_align(board, heading: VisionHeading, align: AlignCfg = None, imu=None
         if rl is not None:
             actions.append(("视觉日志", rl.close))
         cleanup(*actions)
-
-
-def describe(info: dict) -> str:
-    """把诊断字典格式化成一行中文（和 straight_pid.describe 一个风格）。"""
-    if not info.get("ctrl"):
-        return f"一次都没动（{info['reason']}）"
-    src_name = {"gyro": "陀螺", "gap": "电机里程差", "vision": "视觉差分"}.get(
-        info.get("rate_src"), info.get("rate_src"))
-    extra = ""
-    if info.get("lost"):
-        extra += (f"；有 {info['lost_total']:.1f}s 拿不到边界（这期间保持不动）")
-    if info.get("ref_fallback"):
-        extra += f"；{info['ref_fallback']} 拍因为只有一侧边界退回了 e"
-    if info.get("gated"):
-        extra += f"；{info['gated']} 帧的误差跳变被截断（关键点预测偶发跳变，已挡掉）"
-    return (f"误差 {info['err']:+.2f}°（容差 ±{info['tol']:g}°，出发 "
-            f"{info['err0']:+.2f}°，最大 {info['e_max']:.1f}°），转了 "
-            f"{info['rot']:+.1f}°，用了 {info['frames']} 帧边界，内环 {src_name}，"
-            f"差动均值 {info['trim_avg']:.0f}mm/s{extra}")

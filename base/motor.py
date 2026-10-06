@@ -1,9 +1,12 @@
 """驱动板串口：速度指令、累计编码器和轮速反馈，单位 mm/s。"""
+import glob
 import re
+import threading
 import time
 
 import serial
-from config import BASE
+from config import BASE, TURN
+from .control import MotionCancelled, check_cancel, cleanup
 
 
 BAUD = BASE["baudrate"]
@@ -85,9 +88,6 @@ class SerialBoard:
         cleanup(('电机停车', self.stop), ('电机串口', self.ser.close))
 
 
-from .control import MotionCancelled, check_cancel, cleanup
-import threading
-import glob
 
 def find_motor_port(baud=BAUD, stop_event=None):
     """找出电机驱动板：谁能回 $read_flash 里的 Motor_Version 谁是。"""
@@ -217,7 +217,7 @@ class Motor:
             self.board._send("pwm:%d,%d,%d,%d" % tuple(wheels))
 
     def brake(self, speeds):
-        duties = tuple(round(max(-1000, min(1000, -3000 * value)))
+        duties = tuple(round(max(-1000, min(1000, -TURN["BRAKE_KP"] * value)))
                        if abs(value) >= 0.02 else 0 for value in speeds)
         self.pwm(duties)
         return duties
