@@ -110,5 +110,12 @@ class CameraStream:
         self.stop.set()
         with self.condition:
             self.condition.notify_all()
-        cleanup(('摄像头释放', self.camera.release),
+
+        def release():
+            # VideoCapture 的释放也必须与 read()/set() 串行；否则可能在
+            # 采集线程仍访问 V4L2 缓冲区时销毁它，触发原生代码段错误。
+            with self._capture_lock:
+                self.camera.release()
+
+        cleanup(('摄像头释放', release),
                 ('摄像头采集线程', lambda: self.thread.join(timeout=3.0)))

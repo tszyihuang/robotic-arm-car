@@ -47,7 +47,7 @@ class SerialBoard:
 
     def feedback(self, timeout=0.08):
         """
-        读最新一条 $MAll 和同一批数据里的 $MTEP，返回 (totals, tep)。
+        独立解析最新 $MAll 和 $MTEP，返回 (totals, tep)，任一项可为 None。
         CH340 按 USB 帧成批送数据，单次 read 可能只拿到半行，所以循环到解析出完整一行为止。
         """
         buf, end = self._feedback_buf, time.monotonic() + timeout
@@ -55,7 +55,7 @@ class SerialBoard:
             d = self.ser.read(65536)
             if d:
                 buf += d
-                if self._RE_MALL.search(buf):
+                if self._RE_MALL.search(buf) or self._RE_MTEP.search(buf):
                     for _ in range(64):          # 队列里还有就一并读掉，保证拿到最新一条
                         d2 = self.ser.read(65536)
                         if not d2:
@@ -74,10 +74,8 @@ class SerialBoard:
             except ValueError:
                 pass
         tm = self._RE_MALL.findall(buf)
-        if not tm:
-            return None, None
         tp = self._RE_MTEP.findall(buf)
-        return ([int(x) for x in tm[-1]],
+        return ([int(x) for x in tm[-1]] if tm else None,
                 [int(x) for x in tp[-1]] if tp else None)
 
     def stop(self):
@@ -126,6 +124,7 @@ class Motor:
         self._last_sequence = 0
         self._totals = self._increments = None
         self.capture_stamp = 0.0
+        self._increment_stamp = self._last_increment_stamp = 0.0
         self.counts = None
         self.stamp = 0.0
         self.thread = None
@@ -156,20 +155,27 @@ class Motor:
 
     def _store_feedback(self, totals, increments, stamp):
         with self.condition:
-            if stamp <= self.capture_stamp:
-                return
-            self.sequence += 1
-            self._totals = list(totals)
-            self._increments = list(increments) if increments is not None else None
-            self.capture_stamp = stamp
-            self.condition.notify_all()
+            updated = False
+            if totals is not None and stamp > self.capture_stamp:
+                self.sequence += 1
+                self._totals = list(totals)
+                self.capture_stamp = stamp
+                updated = True
+            # 两种协议帧可能分批到达。仅有里程的新帧不能清空未消费的轮速，
+            # 也不能延长轮速有效期；轮速按自身采集时间最多消费一次。
+            if increments is not None and stamp > self._increment_stamp:
+                self._increments = list(increments)
+                self._increment_stamp = stamp
+                updated = True
+            if updated:
+                self.condition.notify_all()
 
     def _read(self):
         try:
             while not self.shutdown.is_set():
                 with self.lock:
                     totals, increments = self.board.feedback(0.001)
-                if totals is not None:
+                if totals is not None or increments is not None:
                     self._store_feedback(totals, increments, time.monotonic())
                 self.shutdown.wait(0.001)
         except Exception as exc:
@@ -189,7 +195,12 @@ class Motor:
                         and time.monotonic() - self.capture_stamp < BASE["feedback_stale"]):
                     self._last_sequence = self.sequence
                     self._consumed_stamp = self.capture_stamp
-                    return list(self._totals), (list(self._increments) if self._increments is not None else None)
+                    increments = None
+                    if (self._increment_stamp > self._last_increment_stamp
+                            and time.monotonic() - self._increment_stamp < BASE["feedback_stale"]):
+                        increments = list(self._increments)
+                        self._last_increment_stamp = self._increment_stamp
+                    return list(self._totals), increments
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None, None

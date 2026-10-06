@@ -83,6 +83,7 @@ class EncoderTests(unittest.TestCase):
         self.motor.sequence = self.motor._last_sequence = 0
         self.motor._totals = self.motor._increments = None
         self.motor.capture_stamp = 0.0
+        self.motor._increment_stamp = self.motor._last_increment_stamp = 0.0
         self.motor.counts = None
         self.motor.stamp = 0.0
 
@@ -117,6 +118,48 @@ class EncoderTests(unittest.TestCase):
                                      b"10,11,12#", b""]
         self.assertEqual(board.feedback(0.01), ([1, 2, 3, 4], [5, 6, 7, 8]))
         self.assertEqual(board.feedback(0.01), ([9, 10, 11, 12], None))
+
+    def test_protocol_preserves_speed_only_frame_and_partial_totals(self):
+        board = SerialBoard.__new__(SerialBoard)
+        board._feedback_buf, board.battery = b"", None
+        board.ser = Mock()
+        board.ser.read.side_effect = [b"$MTEP:5,6,7,8#$MAll:9,", b"",
+                                     b"10,11,12#", b""]
+        self.assertEqual(board.feedback(0.01), (None, [5, 6, 7, 8]))
+        self.assertEqual(board.feedback(0.01), ([9, 10, 11, 12], None))
+
+    def test_split_speed_frame_survives_totals_updates_and_is_consumed_once(self):
+        with patch("base.motor.time.monotonic", return_value=100.1):
+            self.motor._store_feedback([20] * 4, None, 100.0)
+            self.assertEqual(self.motor.feedback(0), ([20] * 4, None))
+            self.motor._store_feedback(None, [1] * 4, 100.01)
+            self.motor._store_feedback([21] * 4, None, 100.02)
+            self.motor._store_feedback([22] * 4, None, 100.03)
+            self.assertEqual(self.motor.feedback(0), ([22] * 4, [1] * 4))
+            self.motor._store_feedback([23] * 4, None, 100.04)
+            self.assertEqual(self.motor.feedback(0), ([23] * 4, None))
+
+    def test_new_totals_cannot_refresh_stale_speed(self):
+        self.motor._store_feedback(None, [1] * 4, 100.0)
+        self.motor._store_feedback([20] * 4, None, 100.4)
+        with patch("base.motor.time.monotonic", return_value=100.4):
+            self.assertEqual(self.motor.feedback(0), ([20] * 4, None))
+
+    def test_reader_stores_speed_only_packets(self):
+        self.motor.shutdown = threading.Event()
+        self.motor.lock = threading.Lock()
+        self.motor.board = Mock()
+
+        def feedback(timeout):
+            self.motor.shutdown.set()
+            return None, [1] * 4
+
+        self.motor.board.feedback.side_effect = feedback
+        with patch("base.motor.time.monotonic", return_value=100.0):
+            self.motor._read()
+        self.motor._store_feedback([20] * 4, None, 100.01)
+        with patch("base.motor.time.monotonic", return_value=100.02):
+            self.assertEqual(self.motor.feedback(0), ([20] * 4, [1] * 4))
 
     def test_brake_uses_config_and_limits_pwm_in_both_directions(self):
         self.motor.pwm = Mock()

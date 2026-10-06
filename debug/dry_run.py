@@ -1,4 +1,4 @@
-"""只打印动作的设备；与实机共用 main.py、路线及任务函数。"""
+"""只打印动作的设备；与实机共用 tasks.txt 的 [主线] 指令。"""
 from config import BASE, ARM, VISION, POSITION, ALIGN
 
 

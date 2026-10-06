@@ -50,10 +50,54 @@ class FakeCapture:
             self.reading = False
 
     def release(self):
+        if self.reading:
+            raise AssertionError('不能在读取画面期间释放摄像头')
         self.closed = True
 
 
 class CameraTests(unittest.TestCase):
+    def test_close_waits_for_active_read_before_release(self):
+        capture = FakeCapture()
+        entered, finish = threading.Event(), threading.Event()
+        errors = []
+
+        def read():
+            capture.reading = True
+            entered.set()
+            try:
+                if not finish.wait(2.0):
+                    raise TimeoutError('测试未解除摄像头读取等待')
+                return True, SimpleNamespace(shape=(capture.height, capture.width, 3))
+            finally:
+                capture.reading = False
+
+        capture.read = read
+        with patch('cv2.VideoCapture', return_value=capture):
+            camera = CameraStream()
+
+        def close():
+            try:
+                camera.close()
+            except BaseException as exc:
+                errors.append(exc)
+
+        closer = threading.Thread(target=close)
+        try:
+            self.assertTrue(entered.wait(1.0))
+            closer.start()
+            self.assertTrue(camera.stop.wait(1.0))
+            self.assertFalse(capture.closed)
+        finally:
+            finish.set()
+            if closer.ident is not None:
+                closer.join(timeout=3.0)
+            else:
+                camera.close()
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(capture.closed)
+        self.assertFalse(camera.thread.is_alive())
+
     def test_resolution_switch_drops_buffered_old_size_and_publishes_fresh_frame(self):
         capture = FakeCapture()
         with patch('cv2.VideoCapture', return_value=capture):

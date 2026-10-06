@@ -1,6 +1,6 @@
 # 比赛小车
 
-普通 Python 项目，从项目根目录运行。`main.py` 串联扫码、夹球和底盘路线，设备按需连接并在整趟比赛中复用。
+普通 Python 项目，从项目根目录运行。`main.py` 读取同目录 `tasks.txt` 的 `[主线]`，按文件顺序逐条执行；设备按需连接并在整趟比赛中复用。
 
 ## 运行
 
@@ -10,7 +10,11 @@
 python3 main.py --dry-run
 ```
 
-干跑共用实际主线和任务函数，以二维码 `211` 演示任务映射，预览中间小球动作；实际位置由视觉确认。
+干跑与实机读取同一份 `[主线]`。支持空行和 `#` 注释，读到下一个段标题即结束，其他段中的指令不执行。启动时检查整段指令的名称、参数数量和数值格式，错误包含任务表行号。
+
+可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`。扫码只输出识别结果，不自动调用其他段或抓球分支。
+
+动作均需在 `[主线]` 明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。
 
 运行依赖列在 `requirements.txt`，已验证 Python 3.12 和 Ultralytics 8.4.164。安装依赖时保留本机已匹配的 OpenCV、PyTorch、torchvision 和 CUDA 环境。
 
@@ -26,9 +30,11 @@ python3 main.py
 
 | 文件或目录 | 用途 |
 | --- | --- |
-| `main.py` | 比赛主线 |
+| `main.py` | 读取任务表、按序执行和退出清理 |
+| `tasks.txt` | 实际执行的 `[主线]` 指令和参数 |
+| `tasks/runner.py` | 主线指令解析及设备调用 |
 | `config.py` | 端口、控制参数、关节限位和模型路径 |
-| `tasks/route.py` | 路线 |
+| `tasks/route.py` | 保留的路线函数，主程序不自动调用 |
 | `tasks/scan.py` | 抬头扫码与回位 |
 | `tasks/ball.py` | 小球观察与夹球动作 |
 | `tasks/target.py`、`tasks/delivery.py` | 待填写的打靶、取放物体动作 |
@@ -51,9 +57,9 @@ python3 main.py
 
 ## 待填写动作
 
-当前只有中间小球动作已实现。左/右小球、三个位置的靶和物体共 8 个分支会抛出 `NotImplementedError`，选中后停止主线。打靶和取放物体的路线、观察姿态也需要补充，完成后接入 `main.py`。
+保留的任务函数中只有中间小球动作已实现。左/右小球、三个位置的靶和物体共 8 个分支调用时会抛出 `NotImplementedError`。`main.py` 当前只执行 `[主线]`，不会自动调用这些函数，也不会执行任务表的其他段。
 
-主线 25 步和中间小球 7 步的顺序、数值由 `tests/fixtures/mission_actions.json` 固定验证。
+主线顺序和数值由 `tasks.txt` 决定；测试验证段落边界、指令顺序和异常清理。中间小球独立函数的 7 步动作仍由 `tests/fixtures/mission_actions.json` 验证。
 
 ## 调试与验证
 

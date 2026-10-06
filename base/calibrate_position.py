@@ -101,7 +101,10 @@ def calibrate_position(board, imu, speed=straight.SPEED_CRUISE,
                 d_l, d_r = wheels.travel(totals)
                 dist, gap = -(d_l + d_r) / 2.0, d_l - d_r
             if now - last_totals >= FEEDBACK_STALE or now - last_steps >= FEEDBACK_STALE:
-                reason = "编码器里程或轮速断流，已停车"
+                reason = ("编码器里程或轮速断流，已停车"
+                          f"（里程 {1000 * (now - last_totals):.0f}ms 未更新，"
+                          f"轮速 {1000 * (now - last_steps):.0f}ms 未更新，"
+                          f"阈值 {1000 * FEEDBACK_STALE:.0f}ms）")
                 break
             if dist >= max_distance_mm:
                 reason = "达到最大倒车距离，未检测到碰撞，已停车"

@@ -1,10 +1,12 @@
-"""直接调用的主线、迁移顺序、分支失败和清理验证；不连接实车。"""
+"""任务表主线、独立抓球动作与退出清理验证；不连接实车。"""
 import contextlib
 import io
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -43,33 +45,84 @@ class Recorder:
 
 
 class MissionTests(unittest.TestCase):
-    def test_main_25_steps_and_middle_7_steps_match_baseline(self):
-        # 固定迁移时的动作基准，仅用于回归测试。
-        fixture = Path(__file__).with_name("fixtures") / "mission_actions.json"
-        data = json.loads(fixture.read_text())
-        actions = {name: [(command, tuple(args)) for command, args in rows]
-                   for name, rows in data.items()}
-        self.assertEqual(len(actions["main"]), 25)
-        self.assertEqual(len(actions["middle_ball"]), 7)
-        expected = []
-        for action in actions["main"]:
-            expected.append(action)
-            if action[0] == "抓球任务":
-                expected.extend(actions["middle_ball"])
+    def run_tasks(self, text, *devices):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tasks.txt"
+            path.write_text(text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main.run(*devices, tasks_path=path)
+
+    def test_main_executes_only_selected_section_in_file_order(self):
+        text = """[主线]
+calibrate-position
+turn 44 0.24
+align
+straight 0.48 # 使用任务表中的新距离
+vision-straight 0.45
+arm-calibrate
+arm-move -90 37 110 62
+gripper-open
+gripper-close
+home
+arm-home
+scan-qrcode
+[抓中间的小球]
+gripper-open
+这段不应解析或执行
+"""
         trace = []
         devices = [Recorder(trace) for _ in range(3)]
-        main.run(*devices)
-        self.assertEqual(trace, expected)
+        self.run_tasks(text, *devices)
+        self.assertEqual(trace, [
+            ("calibrate-position", ()), ("turn", (44, 0.24)), ("align", ()),
+            ("straight", (0.48,)), ("vision-straight", (0.45,)),
+            ("arm-calibrate", ()), ("arm-move", (-90, 37, 110, 62)),
+            ("gripper-open", ()), ("gripper-close", ()),
+            ("arm-home", ()), ("arm-home", ()), ("scan-qrcode", ()),
+        ])
         self.assertEqual([d.cleaned for d in devices], [["stop", "close"], ["cancel", "close"], ["close"]])
+
+    def test_main_does_not_insert_calibration_scan_or_ball_actions(self):
+        trace = []
+        devices = [Recorder(trace) for _ in range(3)]
+        self.run_tasks("[主线]\nstraight 0.48\n[抓中间的小球]\ngripper-open\n", *devices)
+        self.assertEqual(trace, [("straight", (0.48,))])
+
+    def test_invalid_later_command_prevents_all_motion(self):
+        trace = []
+        devices = [Recorder(trace) for _ in range(3)]
+        with self.assertRaisesRegex(ValueError, "tasks.txt:3"):
+            self.run_tasks("[主线]\nstraight 0.48\nturn 44 错误\n", *devices)
+        self.assertEqual(trace, [])
+        self.assertTrue(all(d.cleaned for d in devices))
+
+    def test_cancel_before_step_does_not_send_motion(self):
+        devices = [Mock() for _ in range(3)]
+        stop = threading.Event()
+        stop.set()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tasks.txt"
+            path.write_text("[主线]\nstraight 0.48\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(MotionCancelled):
+                main.run(*devices, tasks_path=path, stop_event=stop)
+        devices[0].straight.assert_not_called()
+
+    def test_middle_ball_7_steps_match_baseline(self):
+        fixture = Path(__file__).with_name("fixtures") / "mission_actions.json"
+        data = json.loads(fixture.read_text())
+        expected = [(command, tuple(args)) for command, args in data["middle_ball"]]
+        self.assertEqual(len(expected), 7)
+        trace = []
+        ball.middle(Recorder(trace))
+        self.assertEqual(trace, expected)
 
     def test_missing_ball_branch_stops_before_remaining_route(self):
         for position in ("left", "right"):
             trace = []
             devices = [Recorder(trace, position) for _ in range(3)]
             with self.subTest(position=position), self.assertRaises(NotImplementedError):
-                main.run(*devices)
+                ball.run(devices[1], devices[2], "green")
             self.assertNotIn(("vision-straight", (1.76,)), trace)
-            self.assertTrue(all(d.cleaned for d in devices))
 
     def test_all_eight_missing_actions_fail_explicitly(self):
         missing = [ball.left, ball.right, target.left, target.middle, target.right,
@@ -81,10 +134,9 @@ class MissionTests(unittest.TestCase):
     def test_qr_failure_cannot_reach_ball_route(self):
         for error in (TimeoutError("扫码超时"), ValueError("二维码无效")):
             base, arm, vision = Mock(), Mock(), Mock()
-            with patch("tasks.pause"), patch("tasks.scan.pause"), patch("tasks.route.pause"):
-                vision.scan_qrcode.side_effect = error
-                with self.assertRaises(type(error)):
-                    main.run(base, arm, vision)
+            vision.scan_qrcode.side_effect = error
+            with self.assertRaises(type(error)):
+                self.run_tasks("[主线]\nscan-qrcode\nturn 87 0.38\n", base, arm, vision)
             base.turn.assert_not_called()
             base.stop.assert_called_once()
             vision.close.assert_called_once()
@@ -99,7 +151,7 @@ class MissionTests(unittest.TestCase):
             arm.close.side_effect = OSError("舵机关闭失败")
             with contextlib.redirect_stderr(io.StringIO()) as output:
                 with self.assertRaises(type(original)) as failed:
-                    main.run(base, arm, vision)
+                    self.run_tasks("[主线]\narm-calibrate\n", base, arm, vision)
             self.assertIs(failed.exception, original)
             vision.close.assert_called_once()
             self.assertEqual(output.getvalue().count("清理失败"), 4)
@@ -119,13 +171,17 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         result = subprocess.run([sys.executable, "-B", "-c", script, str(ROOT)],
                                 cwd="/tmp", capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("base.vision_straight(1.55 m", result.stdout)
-        self.assertIn("干跑不选择实际位置", result.stdout)
+        self.assertIn("干跑：按 tasks.txt 的 [主线]", result.stdout)
+        steps = main.load_main(ROOT / "tasks.txt")
+        for index, step in enumerate(steps, 1):
+            self.assertIn(f"[主线 {index}/{len(steps)}] {step.command}", result.stdout)
+        self.assertNotIn("条件分支预览", result.stdout)
 
     def test_actual_sigint_cancels_main_and_closes_all_devices(self):
         script = '''
 import main, os, signal, threading, time
 from unittest.mock import Mock, patch
+from tasks.runner import Step
 base, arm, vision = Mock(), Mock(), Mock()
 arm.calibrate.side_effect = lambda: time.sleep(10)
 base.stop.side_effect = lambda: print('base stopped')
@@ -133,7 +189,7 @@ arm.cancel.side_effect = lambda: print('arm stopped')
 base.close.side_effect = lambda: print('base closed')
 arm.close.side_effect = lambda: print('arm closed')
 vision.close.side_effect = lambda: print('vision closed')
-with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_value=arm), patch('vision.api.Vision', return_value=vision):
+with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_value=arm), patch('vision.api.Vision', return_value=vision), patch('main.load_main', return_value=[Step(1, 'arm-calibrate', ())]):
     threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
     raise SystemExit(main.main([]))
 '''
