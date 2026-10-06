@@ -6,10 +6,75 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from base.control import MotionCancelled
 from vision.api import Vision
 
 
 class VisionApiTests(unittest.TestCase):
+    def test_scan_uses_1080p_and_restores_720p_on_success_error_or_cancel(self):
+        for error in (None, TimeoutError('扫码超时'), OSError('断开'),
+                      MotionCancelled('取消'), KeyboardInterrupt()):
+            with self.subTest(error=error):
+                vision = Vision()
+                camera = Mock()
+                with patch('vision.api.CameraStream', return_value=camera), \
+                        patch('vision.api.scan_qrcode', return_value='211', side_effect=error) as scan:
+                    if error is None:
+                        self.assertEqual(vision.scan_qrcode(), '211')
+                    else:
+                        with self.assertRaises(type(error)) as failed:
+                            vision.scan_qrcode()
+                        self.assertIs(failed.exception, error)
+                self.assertEqual([call.args for call in camera.set_resolution.call_args_list],
+                                 [(1920, 1080), (1280, 720)])
+                self.assertFalse(vision._scanning.is_set())
+                self.assertIsNone(vision.sample().info)
+                vision.close()
+
+    def test_unsupported_scan_resolution_restores_camera_without_decoding(self):
+        vision = Vision()
+        camera = Mock()
+        camera.set_resolution.side_effect = [RuntimeError('不支持 1080p'), None]
+        with patch('vision.api.CameraStream', return_value=camera), \
+                patch('vision.api.scan_qrcode') as scan, self.assertRaisesRegex(RuntimeError, '1080p'):
+            vision.scan_qrcode()
+        scan.assert_not_called()
+        self.assertEqual(camera.set_resolution.call_args.args, (1280, 720))
+        self.assertFalse(vision._scanning.is_set())
+        vision.close()
+
+    def test_resolution_restore_failure_keeps_original_scan_error(self):
+        vision = Vision()
+        camera = Mock()
+        original = TimeoutError('扫码超时')
+        camera.set_resolution.side_effect = [None, OSError('恢复失败')]
+        with patch('vision.api.CameraStream', return_value=camera), \
+                patch('vision.api.scan_qrcode', side_effect=original), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(TimeoutError) as failed:
+            vision.scan_qrcode()
+        self.assertIs(failed.exception, original)
+        self.assertFalse(vision._scanning.is_set())
+        vision.close()
+
+    def test_inference_discards_frames_captured_before_resolution_switch(self):
+        vision = Vision(clock=lambda: 21.0)
+        vision._frame_cutoff = 20.0
+        camera = Mock()
+        old, new = object(), object()
+        camera.next_frame.side_effect = [(old, 1, 19.0), (new, 2, 21.0), OSError('结束采集')]
+        vision._boundary_model = Mock()
+        vision._boundary_model.predict.return_value = {
+            'size': [1280, 720], 'left': {'a': -0.3, 'b': 496},
+            'right': {'a': 0.3, 'b': 784}, 'timing_ms': {'total': 1},
+        }
+        with patch('vision.api.CameraStream', return_value=camera):
+            vision.set_models(boundary=True, objects=False)
+        vision._thread.join(timeout=1)
+        self.assertFalse(vision._thread.is_alive())
+        vision._boundary_model.predict.assert_called_once_with(new)
+        self.assertEqual(vision.sample().frames, 2)
+        vision.close()
+
     def test_scan_and_observation_share_camera_and_object_model(self):
         camera = Mock(condition=threading.Condition(), index=10)
         camera.next_frame.side_effect = [(object(), i, time.time()) for i in range(11, 17)]

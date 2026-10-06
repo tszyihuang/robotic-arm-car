@@ -5,25 +5,30 @@ import json
 from pathlib import Path
 import signal
 import socket
+import sys
+import tempfile
 import threading
 import time
 from urllib.parse import urlsplit
 
+# 直接运行文件时，Python 默认只把 debug/ 放入模块搜索路径。
+if __name__ == '__main__' and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from vision.api import Vision
 from base.control import cleanup
+from config import VISION
 
 
 class CameraHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def reply(self, status, payload, content_type, filename=None):
+    def reply(self, status, payload, content_type):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(payload)))
-        if filename:
-            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
         self.end_headers()
         try:
             self.wfile.write(payload)
@@ -38,10 +43,11 @@ class CameraHandler(BaseHTTPRequestHandler):
         try:
             if path == '/':
                 self.reply(200, Path(__file__).with_name('camera.html').read_bytes(), 'text/html; charset=utf-8')
-            elif path in ('/frame.jpg', '/snapshot.jpg'):
+            elif path == '/frame.jpg':
                 image, _ = self.server.vision.snapshot()
-                filename = time.strftime('camera-%Y%m%d-%H%M%S.jpg') if path == '/snapshot.jpg' else None
-                self.reply(200, image, 'image/jpeg', filename)
+                self.reply(200, image, 'image/jpeg')
+            elif path == '/stream.mjpg':
+                self.stream()
             elif path == '/api/status':
                 status = self.server.vision.status()
                 camera = self.server.vision.camera
@@ -52,6 +58,23 @@ class CameraHandler(BaseHTTPRequestHandler):
                 self.json_reply(404, {'error': '没有此页面'})
         except (RuntimeError, OSError) as exc:
             self.json_reply(503, {'error': str(exc)})
+
+    def stream(self):
+        image, stamp = self.server.vision.snapshot(after_stamp=0.0)
+        self.connection.settimeout(5.0)
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            while not self.server.vision.stop_event.is_set():
+                header = (f'--frame\r\nContent-Type: image/jpeg\r\n'
+                          f'Content-Length: {len(image)}\r\n\r\n').encode('ascii')
+                self.wfile.write(header + image + b'\r\n')
+                image, stamp = self.server.vision.snapshot(after_stamp=stamp)
+        except (RuntimeError, OSError):
+            # 断线、取消、摄像头异常或慢客户端超时均结束当前连接。
+            return
 
     def do_POST(self):
         try:
@@ -71,6 +94,19 @@ class CameraHandler(BaseHTTPRequestHandler):
                     raise ValueError('扫码不接受额外参数')
                 with self.server.action_lock:
                     result = {'ok': True, 'qr_data': self.server.vision.scan_qrcode()}
+            elif path == '/api/screenshot':
+                if not isinstance(body, dict) or body:
+                    raise ValueError('截图不接受额外参数')
+                with self.server.action_lock:
+                    image, _ = self.server.vision.snapshot()
+                    directory = Path(self.server.screenshot_dir).resolve()
+                    directory.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(
+                        dir=directory, prefix=time.strftime('camera-%Y%m%d-%H%M%S-'),
+                        suffix='.jpg', delete=False,
+                    ) as output:
+                        output.write(image)
+                    result = {'ok': True, 'path': output.name}
             else:
                 self.json_reply(404, {'error': '没有此操作'})
                 return
@@ -111,8 +147,10 @@ def main(args=None):
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         server = ThreadingHTTPServer((opts.host, opts.port), CameraHandler)
+        server.daemon_threads = True
         server.vision = vision
         server.action_lock = threading.Lock()
+        server.screenshot_dir = VISION['screenshot_dir']
         vision.start_camera()
         print(f'本机：http://127.0.0.1:{opts.port}', flush=True)
         for address in local_addresses():

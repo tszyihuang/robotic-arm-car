@@ -19,6 +19,9 @@ class Vision:
         self.condition = threading.Condition()
         self._connection_lock = threading.RLock()
         self._model_lock = threading.RLock()
+        self._scan_lock = threading.Lock()
+        self._scanning = threading.Event()
+        self._frame_cutoff = 0.0
         self._inference_stop = threading.Event()
         self._thread = None
         self.camera = None
@@ -65,9 +68,30 @@ class Vision:
             check_cancel(self.stop_event)
 
     def scan_qrcode(self, timeout=None):
-        camera = self.start_camera()
-        return scan_qrcode(camera, self.config["scan_timeout"] if timeout is None else timeout,
-                           stop_event=self.stop_event)
+        with self._scan_lock:
+            camera = self.start_camera()
+            self._scanning.set()
+            try:
+                self._set_resolution(camera, self.config["scan_width"], self.config["scan_height"])
+                return scan_qrcode(camera, self.config["scan_timeout"] if timeout is None else timeout,
+                                   stop_event=self.stop_event)
+            finally:
+                try:
+                    cleanup(("恢复摄像头分辨率", lambda: self._set_resolution(
+                        camera, self.config["width"], self.config["height"])))
+                finally:
+                    self._scanning.clear()
+
+    def _set_resolution(self, camera, width, height):
+        with self._model_lock:
+            camera.set_resolution(width, height)
+            self._frame_cutoff = self._clock()
+            with self.condition:
+                self._objects = None
+                state = "loading" if self._enabled["boundary"] else "off"
+                self._sample = BoundarySample(None, None, self._sample.seq, state, "", 0.0, 0.0)
+                self._state = "loading" if any(self._enabled.values()) else "off"
+                self.condition.notify_all()
 
     def observe_target(self, kind, value):
         camera = self.start_camera()
@@ -137,25 +161,27 @@ class Vision:
                 check_cancel(self.stop_event)
                 with self.condition:
                     enabled = dict(self._enabled)
-                if not any(enabled.values()):
+                if not any(enabled.values()) or self._scanning.is_set():
                     self._inference_stop.wait(0.05)
                     continue
                 frame, index, stamp = self.camera.next_frame(after=index, stop_event=self._inference_stop)
                 geometry = detections = None
                 with self._model_lock:
                     check_cancel(self.stop_event)
+                    if self._scanning.is_set() or stamp < self._frame_cutoff:
+                        continue
                     if enabled["boundary"]:
                         geometry = self._boundary_model.predict(frame)
                     if enabled["objects"]:
                         detections = self._object_model.predict(frame)
-                with self.condition:
-                    if geometry is not None and self._enabled["boundary"]:
-                        self.ingest_boundary(geometry, index, stamp,
-                                             inference_seconds=geometry["timing_ms"]["total"] / 1000)
-                    if detections is not None and self._enabled["objects"]:
-                        self._objects = (detections, index, stamp)
-                    self._state = "ready" if any(self._enabled.values()) else "off"
-                    self._error = ""
+                    with self.condition:
+                        if geometry is not None and self._enabled["boundary"]:
+                            self.ingest_boundary(geometry, index, stamp,
+                                                 inference_seconds=geometry["timing_ms"]["total"] / 1000)
+                        if detections is not None and self._enabled["objects"]:
+                            self._objects = (detections, index, stamp)
+                        self._state = "ready" if any(self._enabled.values()) else "off"
+                        self._error = ""
         except Exception as exc:
             state = "off" if self._inference_stop.is_set() or isinstance(exc, MotionCancelled) else "error"
             with self.condition:
@@ -199,14 +225,18 @@ class Vision:
                     "error": camera_error or self._error,
                     "models": dict(self._enabled)}
 
-    def snapshot(self):
+    def snapshot(self, *, after_stamp=None):
         """调试 JPEG；直接复制新鲜原图，再绘制仍有效的模型结果。"""
         import cv2
         camera = self.start_camera()
-        with camera.condition:
-            if camera.frame is None or self._clock() - camera.capture_stamp > self.config["frame_stale"]:
-                raise RuntimeError("当前没有新鲜画面")
-            frame, stamp = camera.frame.copy(), camera.capture_stamp
+        if after_stamp is None:
+            with camera.condition:
+                if camera.frame is None or self._clock() - camera.capture_stamp > self.config["frame_stale"]:
+                    raise RuntimeError("当前没有新鲜画面")
+                frame, stamp = camera.frame.copy(), camera.capture_stamp
+        else:
+            frame, _, stamp = camera.next_frame(after_stamp=after_stamp, stop_event=self.stop_event)
+            frame = frame.copy()
         with self.condition:
             objects, sample = self._objects, self._sample
         if objects is not None and self._clock() - objects[2] < self.config["frame_stale"]:

@@ -88,7 +88,8 @@ SENSOR = {
 
 VISION = {
     "device": 0, "infer_device": "cpu", "fp16": True,
-    "width": 1920, "height": 1080, "frame_stale": 0.6,
+    "width": 1280, "height": 720, "scan_width": 1920, "scan_height": 1080,
+    "frame_stale": 0.6, "screenshot_dir": ROOT / "screenshots",
     "scan_timeout": 30.0, "observe_timeout": 10.0,
     "observe_stable_frames": 3, "target_min_area_ratio": 0.001,
     "model_wait": 60.0,

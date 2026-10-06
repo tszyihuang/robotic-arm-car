@@ -2,7 +2,12 @@
 import argparse
 import json
 import math
+from pathlib import Path
+import sys
 import time
+
+if __name__ == '__main__' and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arm.api import Arm
 from base.control import cleanup
