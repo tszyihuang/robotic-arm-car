@@ -6,11 +6,161 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import cv2
+import numpy as np
+
 from base.control import MotionCancelled
 from vision.api import Vision
 
 
 class VisionApiTests(unittest.TestCase):
+    def test_preview_waits_for_both_models_and_uses_their_source_frame(self):
+        vision = Vision()
+        source = np.full((80, 100, 3), 30, dtype=np.uint8)
+        latest = np.full_like(source, 220)
+        camera = Mock(error='', frame=latest, capture_stamp=time.time(),
+                      condition=threading.Condition())
+        entered, release, consumer_started, delivered = [threading.Event() for _ in range(4)]
+        stamp = time.time()
+        geometry = {'left': {'points': [[10, 70], [30, 10]]}, 'right': None,
+                    'timing_ms': {'total': 1}}
+        objects = {'detections': [{'box': [50, 30, 80, 60], 'class_id': 0}]}
+
+        def capture(**kwargs):
+            if camera.next_frame.call_count == 1:
+                return source, 1, stamp
+            vision._inference_stop.wait(2)
+            raise MotionCancelled('结束测试')
+
+        def detect(frame):
+            self.assertIs(frame, source)
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError('测试推理未释放')
+            return objects
+
+        def snapshot():
+            consumer_started.set()
+            try:
+                results.append(vision.snapshot(after_stamp=0.0))
+            except Exception as exc:
+                results.append(exc)
+            finally:
+                delivered.set()
+
+        camera.next_frame.side_effect = capture
+        vision._boundary_model = Mock()
+        vision._boundary_model.predict.return_value = geometry
+        vision._object_model = Mock()
+        vision._object_model.predict.side_effect = detect
+        results = []
+        consumer = threading.Thread(target=snapshot)
+        try:
+            with patch('vision.api.CameraStream', return_value=camera):
+                vision.set_models(boundary=True, objects=True)
+            self.assertTrue(entered.wait(1))
+            consumer.start()
+            self.assertTrue(consumer_started.wait(1))
+            self.assertFalse(delivered.wait(0.05), '物体模型完成前不能发布画面')
+            self.assertIsNone(vision._preview)
+            release.set()
+            self.assertTrue(delivered.wait(1))
+            self.assertIsInstance(results[0], tuple)
+            image, returned_stamp = results[0]
+            decoded = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(returned_stamp, stamp)
+            self.assertLess(int(decoded[75, 95].mean()), 50, '不能用较新的原图配旧结果')
+            self.assertGreater(int(decoded[40, 50, 1]), 150, '应绘制本帧检测框')
+            self.assertGreater(int(decoded[70, 10, 1]), 150, '应绘制本帧边界')
+            self.assertTrue(np.all(source == 30), '绘图不能修改推理原图')
+        finally:
+            release.set()
+            vision.close()
+            if consumer.ident is not None:
+                consumer.join(timeout=2)
+
+    def test_stream_waits_for_next_inference_and_skips_older_completed_frames(self):
+        vision = Vision()
+        vision.camera = Mock(error='', frame=np.full((20, 20, 3), 240, np.uint8),
+                             capture_stamp=103.0, condition=threading.Condition())
+        vision._enabled = {'boundary': False, 'objects': True}
+        source = np.full((20, 20, 3), 30, np.uint8)
+        vision._preview = (source, 100.0, None, {'detections': []})
+        started, delivered = threading.Event(), threading.Event()
+        results = []
+
+        def snapshot():
+            started.set()
+            results.append(vision.snapshot(after_stamp=100.0))
+            delivered.set()
+
+        consumer = threading.Thread(target=snapshot)
+        try:
+            consumer.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(delivered.wait(0.05), '仅有新采集帧时不能更新')
+            with vision.condition:
+                vision._preview = (source, 101.0, None, {'detections': []})
+                vision._preview = (source, 102.0, None, {'detections': []})
+                vision.condition.notify_all()
+            self.assertTrue(delivered.wait(1))
+            self.assertEqual(results[0][1], 102.0)
+            vision.camera.next_frame.assert_not_called()
+        finally:
+            vision.close()
+            consumer.join(timeout=2)
+
+    def test_turning_models_off_wakes_preview_and_returns_unannotated_live_frame(self):
+        vision = Vision()
+        raw = np.full((40, 60, 3), 120, np.uint8)
+        vision.camera = Mock(error='', frame=raw, capture_stamp=time.time(),
+                             condition=threading.Condition())
+        vision._enabled = {'boundary': False, 'objects': True}
+        vision._preview = (raw, 1.0, None, {'detections': []})
+        vision._thread = Mock()
+        vision.camera.next_frame.return_value = (raw, 2, 2.0)
+        started = threading.Event()
+        results = []
+
+        def snapshot():
+            started.set()
+            results.append(vision.snapshot(after_stamp=1.0))
+
+        consumer = threading.Thread(target=snapshot)
+        try:
+            consumer.start()
+            self.assertTrue(started.wait(1))
+            vision.set_models(boundary=False, objects=False)
+            consumer.join(timeout=1)
+            self.assertFalse(consumer.is_alive())
+            self.assertIsNone(vision._preview)
+            self.assertEqual(results[0][1], 2.0)
+            decoded = cv2.imdecode(np.frombuffer(results[0][0], np.uint8), cv2.IMREAD_COLOR)
+            self.assertTrue(np.all(decoded == 120))
+        finally:
+            vision.close()
+            consumer.join(timeout=2)
+
+    def test_inference_result_is_discarded_if_models_change_mid_frame(self):
+        vision = Vision()
+        vision.camera = Mock(error='')
+        vision.camera.next_frame.side_effect = [(object(), 1, time.time()), MotionCancelled('结束测试')]
+        vision._enabled = {'boundary': False, 'objects': True}
+
+        def detect(frame):
+            with vision.condition:
+                vision._model_generation += 1
+                vision._enabled = {'boundary': False, 'objects': False}
+            vision._inference_stop.set()
+            return {'detections': []}
+
+        vision._object_model = Mock()
+        vision._object_model.predict.side_effect = detect
+        vision._infer()
+        self.assertIsNone(vision._preview)
+        self.assertIsNone(vision._objects)
+        vision.close()
+
     def test_scan_uses_1080p_and_restores_720p_on_success_error_or_cancel(self):
         for error in (None, TimeoutError('扫码超时'), OSError('断开'),
                       MotionCancelled('取消'), KeyboardInterrupt()):

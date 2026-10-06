@@ -27,6 +27,8 @@ class Vision:
         self.camera = None
         self._boundary_model = self._object_model = None
         self._enabled = {"boundary": False, "objects": False}
+        self._model_generation = 0
+        self._preview = None
         self._objects = None
         self._state, self._error = "off", ""
         self._sample = BoundarySample(None, None, 0, "off", "", 0.0, 0.0)
@@ -80,7 +82,9 @@ class Vision:
                     cleanup(("恢复摄像头分辨率", lambda: self._set_resolution(
                         camera, self.config["width"], self.config["height"])))
                 finally:
-                    self._scanning.clear()
+                    with self.condition:
+                        self._scanning.clear()
+                        self.condition.notify_all()
 
     def _set_resolution(self, camera, width, height):
         with self._model_lock:
@@ -88,6 +92,8 @@ class Vision:
             self._frame_cutoff = self._clock()
             with self.condition:
                 self._objects = None
+                self._preview = None
+                self._model_generation += 1
                 state = "loading" if self._enabled["boundary"] else "off"
                 self._sample = BoundarySample(None, None, self._sample.seq, state, "", 0.0, 0.0)
                 self._state = "loading" if any(self._enabled.values()) else "off"
@@ -112,11 +118,14 @@ class Vision:
             self._load_models(boundary, objects)
             with self.condition:
                 self._enabled = {"boundary": boundary, "objects": objects}
+                self._model_generation += 1
+                self._preview = None
                 self._state, self._error = ("loading" if boundary or objects else "off"), ""
                 if not boundary:
                     self._sample = BoundarySample(None, None, self._sample.seq, "off", "", 0.0, 0.0)
                 if not objects:
                     self._objects = None
+                self.condition.notify_all()
             if self._thread is None:
                 self._thread = threading.Thread(target=self._infer, name="vision-inference", daemon=True)
                 self._thread.start()
@@ -161,6 +170,7 @@ class Vision:
                 check_cancel(self.stop_event)
                 with self.condition:
                     enabled = dict(self._enabled)
+                    generation = self._model_generation
                 if not any(enabled.values()) or self._scanning.is_set():
                     self._inference_stop.wait(0.05)
                     continue
@@ -175,13 +185,19 @@ class Vision:
                     if enabled["objects"]:
                         detections = self._object_model.predict(frame)
                     with self.condition:
+                        if (generation != self._model_generation or self._scanning.is_set()
+                                or self._closed):
+                            continue
                         if geometry is not None and self._enabled["boundary"]:
                             self.ingest_boundary(geometry, index, stamp,
                                                  inference_seconds=geometry["timing_ms"]["total"] / 1000)
                         if detections is not None and self._enabled["objects"]:
                             self._objects = (detections, index, stamp)
+                        # 同一帧的全部模型执行完才发布；只保留最新完成帧，不排队。
+                        self._preview = (frame, stamp, geometry, detections)
                         self._state = "ready" if any(self._enabled.values()) else "off"
                         self._error = ""
+                        self.condition.notify_all()
         except Exception as exc:
             state = "off" if self._inference_stop.is_set() or isinstance(exc, MotionCancelled) else "error"
             with self.condition:
@@ -225,32 +241,60 @@ class Vision:
                     "error": camera_error or self._error,
                     "models": dict(self._enabled)}
 
-    def snapshot(self, *, after_stamp=None):
-        """调试 JPEG；直接复制新鲜原图，再绘制仍有效的模型结果。"""
-        import cv2
+    def _snapshot_frame(self, after_stamp):
+        """模型开启时等完成帧；关闭模型或扫码时读取实时原图。"""
         camera = self.start_camera()
-        if after_stamp is None:
-            with camera.condition:
-                if camera.frame is None or self._clock() - camera.capture_stamp > self.config["frame_stale"]:
-                    raise RuntimeError("当前没有新鲜画面")
-                frame, stamp = camera.frame.copy(), camera.capture_stamp
-        else:
-            frame, _, stamp = camera.next_frame(after_stamp=after_stamp, stop_event=self.stop_event)
-            frame = frame.copy()
-        with self.condition:
-            objects, sample = self._objects, self._sample
-        if objects is not None and self._clock() - objects[2] < self.config["frame_stale"]:
-            for row in objects[0]["detections"]:
+        deadline = time.monotonic() + 3.0
+        while True:
+            with self.condition:
+                check_cancel(self.stop_event)
+                if self._closed:
+                    raise RuntimeError("视觉已关闭")
+                if camera.error:
+                    raise RuntimeError(camera.error)
+                if any(self._enabled.values()) and not self._scanning.is_set():
+                    if self._state == "error":
+                        raise RuntimeError(self._error)
+                    if self._preview is not None:
+                        frame, stamp, geometry, objects = self._preview
+                        if after_stamp is None or stamp > after_stamp:
+                            return frame.copy(), stamp, geometry, objects
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("YOLO 未返回新的推理画面")
+                    self.condition.wait(min(remaining, 0.05))
+                    continue
+                generation = self._model_generation
+                scanning = self._scanning.is_set()
+            if after_stamp is None:
+                with camera.condition:
+                    if camera.frame is None or self._clock() - camera.capture_stamp > self.config["frame_stale"]:
+                        raise RuntimeError("当前没有新鲜画面")
+                    frame, stamp = camera.frame.copy(), camera.capture_stamp
+            else:
+                frame, _, stamp = camera.next_frame(after_stamp=after_stamp, stop_event=self.stop_event,
+                                                  timeout=max(0.0, deadline - time.monotonic()))
+                frame = frame.copy()
+            with self.condition:
+                if generation == self._model_generation and scanning == self._scanning.is_set():
+                    return frame, stamp, None, None
+
+    def snapshot(self, *, after_stamp=None):
+        """调试 JPEG；检测框和边界只绘制在产生这些结果的原图上。"""
+        import cv2
+        frame, stamp, geometry, objects = self._snapshot_frame(after_stamp)
+        if objects is not None:
+            for row in objects["detections"]:
                 x1, y1, x2, y2 = map(int, row["box"])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
                 label = LABELS.get(row.get("name"))
                 text = " ".join(label) if label else str(row["class_id"])
                 cv2.putText(frame, text, (x1, max(20, y1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        if sample.info is not None and self.age() < self.config["frame_stale"]:
+        if geometry is not None:
             height = frame.shape[0]
             for side in ("left", "right"):
-                line = sample.info.get(side)
+                line = geometry.get(side)
                 if line:
                     points = line.get("points") or [[line["a"] * y + line["b"], y]
                                                    for y in (line.get("near_y", height - 1), line.get("far_y", 0))]
@@ -265,6 +309,7 @@ class Vision:
         with self._connection_lock:
             with self.condition:
                 self._closed = True
+                self._preview = None
                 self._sample = BoundarySample(None, None, self._sample.seq, "off", "", 0.0, 0.0)
                 self.condition.notify_all()
             actions = []
