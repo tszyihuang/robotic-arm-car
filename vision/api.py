@@ -8,7 +8,7 @@ from base.control import check_cancel, cleanup, MotionCancelled
 from .boundary import BoundarySample, valid_geometry
 from .camera import CameraStream
 from .qrcode import scan_qrcode
-from .targets import LABELS, observe
+from .targets import LABELS, candidates_from_detections, colored_targets, observe, validate_target
 
 
 class Vision:
@@ -21,6 +21,7 @@ class Vision:
         self._model_lock = threading.RLock()
         self._scan_lock = threading.Lock()
         self._scanning = threading.Event()
+        self._target_requested = threading.Event()
         self._frame_cutoff = 0.0
         self._inference_stop = threading.Event()
         self._thread = None
@@ -30,6 +31,7 @@ class Vision:
         self._model_generation = 0
         self._preview = None
         self._objects = None
+        self._targets = None
         self._state, self._error = "off", ""
         self._sample = BoundarySample(None, None, 0, "off", "", 0.0, 0.0)
         self._last_index = None
@@ -55,19 +57,30 @@ class Vision:
 
     def _load_models(self, boundary=False, objects=False):
         with self._model_lock:
-            check_cancel(self.stop_event)
+            self._check_open()
             if boundary and self._boundary_model is None:
                 from .yolo_boundary import BoundaryPredictor
                 self._boundary_model = BoundaryPredictor(
                     self.config["boundary_weights"], device=self.config["infer_device"],
                     fp16=self.config["fp16"], args_path=self.config["boundary_args"])
-            check_cancel(self.stop_event)
+            self._check_open()
             if objects and self._object_model is None:
                 from .yolo_objects import ObjectPredictor
                 self._object_model = ObjectPredictor(
                     self.config["objects_weights"], device=self.config["infer_device"],
                     fp16=self.config["fp16"], args_path=self.config["objects_args"])
-            check_cancel(self.stop_event)
+            self._check_open()
+            with self.condition:
+                self.condition.notify_all()
+
+    def _check_open(self):
+        check_cancel(self.stop_event)
+        if self._closed or self._inference_stop.is_set():
+            raise MotionCancelled("视觉已关闭")
+
+    def start(self):
+        """立即启动后台采集、加载及推理；整趟任务复用两套模型。"""
+        return self.set_models(boundary=True, objects=True)
 
     def scan_qrcode(self, timeout=None):
         with self._scan_lock:
@@ -92,37 +105,88 @@ class Vision:
             self._frame_cutoff = self._clock()
             with self.condition:
                 self._objects = None
+                self._targets = None
                 self._preview = None
                 self._model_generation += 1
+                if self._state == "error":
+                    self.condition.notify_all()
+                    return
                 state = "loading" if self._enabled["boundary"] else "off"
                 self._sample = BoundarySample(None, None, self._sample.seq, state, "", 0.0, 0.0)
                 self._state = "loading" if any(self._enabled.values()) else "off"
                 self.condition.notify_all()
 
     def observe_target(self, kind, value):
-        camera = self.start_camera()
-        if kind != "target":
-            self._load_models(objects=True)
-        result = observe(camera, kind, value, self._object_model,
-                         timeout=self.config["observe_timeout"],
-                         stable_frames=self.config["observe_stable_frames"],
-                         min_area_ratio=self.config["target_min_area_ratio"],
-                         stop_event=self.stop_event, predict_lock=self._model_lock)
-        return ("left", "middle", "right")[result["position"]]
+        validate_target(kind, value)
+        # 扫码与观察共用相机，串行请求避免分辨率切换污染稳定帧。
+        with self._scan_lock:
+            camera = self.start_camera()
+            with self._connection_lock:
+                with self.condition:
+                    enabled = dict(self._enabled)
+                self.set_models(boundary=enabled["boundary"],
+                                objects=enabled["objects"] or kind != "target")
+            if kind != "target":
+                deadline = time.monotonic() + self.config["model_wait"]
+                with self.condition:
+                    while self._object_model is None:
+                        self._check_open()
+                        if self._state == "error":
+                            raise RuntimeError(self._error)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("等待目标模型加载超时")
+                        self.condition.wait(min(remaining, 0.05))
+            else:
+                self._target_requested.set()
+            try:
+                result = observe(camera, kind, value,
+                                 timeout=self.config["observe_timeout"],
+                                 stable_frames=self.config["observe_stable_frames"],
+                                 stop_event=self.stop_event,
+                                 candidate_source=lambda **kwargs: self._wait_candidates(kind, **kwargs))
+                return ("left", "middle", "right")[result["position"]]
+            finally:
+                self._target_requested.clear()
+
+    def _wait_candidates(self, kind, *, after, after_stamp, timeout):
+        """读取调用之后的新帧，稳定计数不能重复消费同一份结果。"""
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                self._check_open()
+                if self.camera.error:
+                    raise RuntimeError(self.camera.error)
+                if self._state == "error":
+                    raise RuntimeError(self._error)
+                cached = self._targets if kind == "target" else self._objects
+                if cached is not None:
+                    info, index, stamp = cached
+                    if (index > after and stamp > after_stamp
+                            and self._clock() - stamp <= self.config["frame_stale"]):
+                        candidates = info if kind == "target" else candidates_from_detections(info["detections"], kind)
+                        return candidates, index, stamp
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("目标观察超时：后台未返回新的有效识别结果")
+                self.condition.wait(min(remaining, 0.05))
 
     def set_models(self, *, boundary, objects):
         if type(boundary) is not bool or type(objects) is not bool:
             raise ValueError("模型开关必须为布尔值")
         with self._connection_lock:
-            self.start_camera()
-            self._load_models(boundary, objects)
+            self._check_open()
             with self.condition:
+                if self._state == "error":
+                    raise RuntimeError(self._error)
+                if self._thread is not None and self._enabled == {"boundary": boundary, "objects": objects}:
+                    return {"ok": True, "models": dict(self._enabled)}
                 self._enabled = {"boundary": boundary, "objects": objects}
                 self._model_generation += 1
                 self._preview = None
                 self._state, self._error = ("loading" if boundary or objects else "off"), ""
-                if not boundary:
-                    self._sample = BoundarySample(None, None, self._sample.seq, "off", "", 0.0, 0.0)
+                self._sample = BoundarySample(None, None, self._sample.seq,
+                                              "loading" if boundary else "off", "", 0.0, 0.0)
                 if not objects:
                     self._objects = None
                 self.condition.notify_all()
@@ -132,10 +196,11 @@ class Vision:
         return {"ok": True, "models": dict(self._enabled)}
 
     def enable_boundary(self):
-        with self.condition:
-            enabled = dict(self._enabled)
-        if not enabled["boundary"]:
-            self.set_models(boundary=True, objects=enabled["objects"])
+        with self._connection_lock:
+            with self.condition:
+                enabled = dict(self._enabled)
+            if not enabled["boundary"]:
+                self.set_models(boundary=True, objects=enabled["objects"])
 
     def ingest_boundary(self, info, index, stamp, *, state="ready", error="", inference_seconds=0.0):
         """采集时间随帧保存；旧帧、重复帧、无效几何不能延长有效期。"""
@@ -166,24 +231,28 @@ class Vision:
     def _infer(self):
         index = 0
         try:
+            camera = self.start_camera()
             while not self._inference_stop.is_set():
                 check_cancel(self.stop_event)
                 with self.condition:
                     enabled = dict(self._enabled)
                     generation = self._model_generation
-                if not any(enabled.values()) or self._scanning.is_set():
+                self._load_models(**enabled)
+                if (not any(enabled.values()) and not self._target_requested.is_set()) or self._scanning.is_set():
                     self._inference_stop.wait(0.05)
                     continue
-                frame, index, stamp = self.camera.next_frame(after=index, stop_event=self._inference_stop)
-                geometry = detections = None
+                frame, index, stamp = camera.next_frame(after=index, stop_event=self._inference_stop)
+                geometry = detections = targets = None
                 with self._model_lock:
-                    check_cancel(self.stop_event)
+                    self._check_open()
                     if self._scanning.is_set() or stamp < self._frame_cutoff:
                         continue
                     if enabled["boundary"]:
                         geometry = self._boundary_model.predict(frame)
                     if enabled["objects"]:
                         detections = self._object_model.predict(frame)
+                    if self._target_requested.is_set():
+                        targets = colored_targets(frame, self.config["target_min_area_ratio"])
                     with self.condition:
                         if (generation != self._model_generation or self._scanning.is_set()
                                 or self._closed):
@@ -193,6 +262,8 @@ class Vision:
                                                  inference_seconds=geometry["timing_ms"]["total"] / 1000)
                         if detections is not None and self._enabled["objects"]:
                             self._objects = (detections, index, stamp)
+                        if targets is not None:
+                            self._targets = (targets, index, stamp)
                         # 同一帧的全部模型执行完才发布；只保留最新完成帧，不排队。
                         self._preview = (frame, stamp, geometry, detections)
                         self._state = "ready" if any(self._enabled.values()) else "off"
@@ -202,6 +273,7 @@ class Vision:
             state = "off" if self._inference_stop.is_set() or isinstance(exc, MotionCancelled) else "error"
             with self.condition:
                 self._state, self._error = state, str(exc) if state == "error" else ""
+                self.condition.notify_all()
             self.ingest_boundary(None, index, 0.0, state=state,
                                  error=str(exc) if state == "error" else "")
 
@@ -309,13 +381,19 @@ class Vision:
         with self._connection_lock:
             with self.condition:
                 self._closed = True
+                self._state, self._error = "off", ""
                 self._preview = None
+                self._objects = self._targets = None
                 self._sample = BoundarySample(None, None, self._sample.seq, "off", "", 0.0, 0.0)
                 self.condition.notify_all()
-            actions = []
-            if self.camera is not None:
-                actions.append(("摄像头", self.camera.close))
-            if self._thread is not None:
-                actions.append(("视觉推理线程", self._thread.join))
+            camera, thread = self.camera, self._thread
+        # 不持有连接锁等待线程：后台可能正在等待同一把锁打开相机。
+        actions = []
+        if camera is not None:
+            actions.append(("摄像头", camera.close))
+        if thread is not None:
+            actions.append(("视觉推理线程", thread.join))
+        try:
             cleanup(*actions)
+        finally:
             self.camera = None

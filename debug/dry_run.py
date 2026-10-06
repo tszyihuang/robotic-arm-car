@@ -66,6 +66,9 @@ class DryArm:
 class DryVision:
     dry_run = True
 
+    def start(self):
+        pass
+
     def scan_qrcode(self):
         print(f"vision.scan_qrcode(timeout={VISION['scan_timeout']:g} s)  # 三位 1..3；以下以 211 演示映射")
         return "211"

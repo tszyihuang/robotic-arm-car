@@ -25,6 +25,9 @@ class Recorder:
         self.trace, self.position, self.qr = trace, position, qr
         self.cleaned = []
 
+    def start(self):
+        pass
+
     def __getattr__(self, name):
         def call(*args):
             if name in ("stop", "cancel", "close"):
@@ -106,6 +109,21 @@ gripper-open
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(MotionCancelled):
                 main.run(*devices, tasks_path=path, stop_event=stop)
         devices[0].straight.assert_not_called()
+        devices[2].start.assert_not_called()
+
+    def test_background_vision_starts_before_first_step_and_start_failure_cleans_up(self):
+        base, arm, vision = Mock(), Mock(), Mock()
+        calls = Mock()
+        calls.attach_mock(vision.start, "start")
+        calls.attach_mock(base.straight, "straight")
+        self.run_tasks("[主线]\nstraight 0.48\n", base, arm, vision)
+        self.assertEqual([call[0] for call in calls.mock_calls], ["start", "straight"])
+        vision.start.side_effect = OSError("视觉启动失败")
+        base.straight.reset_mock()
+        with self.assertRaisesRegex(OSError, "视觉启动失败"):
+            self.run_tasks("[主线]\nstraight 0.48\n", base, arm, vision)
+        base.straight.assert_not_called()
+        self.assertEqual(vision.close.call_count, 2)
 
     def test_middle_ball_7_steps_match_baseline(self):
         fixture = Path(__file__).with_name("fixtures") / "mission_actions.json"

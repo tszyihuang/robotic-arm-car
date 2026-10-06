@@ -69,30 +69,39 @@ def choose_position(candidates, value):
     return matches[0], ordered
 
 
-def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
-            min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None):
+def validate_target(kind, value):
     if kind not in ('ball', 'target', 'object') or value not in (SHAPES if kind == 'object' else COLORS):
         raise ValueError('无效的目标类型或颜色/形状')
+
+
+def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
+            min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None,
+            candidate_source=None):
+    validate_target(kind, value)
     # 不复用移动途中或上一个任务留下的画面。
     with camera.condition:
         index = camera.index
+    after_stamp = time.time()
     deadline, previous, count, reason = time.monotonic() + timeout, None, 0, '等待新画面'
     while True:
         check_cancel(stop_event)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f'目标观察超时：{reason}')
-        frame, index, stamp = camera.next_frame(after=index, timeout=min(3.0, remaining), stop_event=stop_event)
-        if kind == 'target':
-            candidates = colored_targets(frame, min_area_ratio)
+        if candidate_source is not None:
+            candidates, index, stamp = candidate_source(after=index, after_stamp=after_stamp, timeout=remaining)
         else:
-            if predict_lock is None:
-                info = predictor.predict(frame)
+            frame, index, stamp = camera.next_frame(after=index, timeout=min(3.0, remaining), stop_event=stop_event)
+            if kind == 'target':
+                candidates = colored_targets(frame, min_area_ratio)
             else:
-                with predict_lock:
-                    check_cancel(stop_event)
+                if predict_lock is None:
                     info = predictor.predict(frame)
-            candidates = candidates_from_detections(info['detections'], kind)
+                else:
+                    with predict_lock:
+                        check_cancel(stop_event)
+                        info = predictor.predict(frame)
+                candidates = candidates_from_detections(info['detections'], kind)
         check_cancel(stop_event)
         if time.time() - stamp > VISION["frame_stale"]:
             previous, count, reason = None, 0, '推理结果对应画面已过期'

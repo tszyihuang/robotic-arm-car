@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 from tasks.runner import load_main, execute
-from base.control import cleanup, MotionCancelled
+from base.control import check_cancel, cleanup, MotionCancelled
 
 TASKS_FILE = Path(__file__).resolve().with_name("tasks.txt")
 
@@ -14,6 +14,8 @@ TASKS_FILE = Path(__file__).resolve().with_name("tasks.txt")
 def run(base, arm, vision, *, tasks_path=None, stop_event=None):
     try:
         steps = load_main(TASKS_FILE if tasks_path is None else tasks_path)
+        check_cancel(stop_event)
+        vision.start()
         for index, step in enumerate(steps, 1):
             args = " ".join(f"{value:g}" for value in step.args)
             print(f"[主线 {index}/{len(steps)}] {step.command} {args}".rstrip(), flush=True)
@@ -37,7 +39,7 @@ def main(args=None):
         from base.api import Base
         from arm.api import Arm
         from vision.api import Vision
-        # 构造只保存配置，连接都在 run() 的清理保护内按需建立。
+        # 构造只保存配置；run() 在清理保护内启动常驻视觉后台。
         base = Base(stop_event=stop_event)
         arm = Arm(stop_event=stop_event)
         vision = Vision(stop_event=stop_event)
