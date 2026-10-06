@@ -239,11 +239,14 @@ class Motor:
     def release(self):
         self.pwm((0, 0, 0, 0))
 
-    def close(self):
+    def close(self, *, release_motors=True):
+        """关闭采集和串口；release_motors=False 保留零速度闭环。"""
         self.shutdown.set()
         actions = []
         if self.thread is not None:
             actions.append(("编码器采集线程", lambda: self.thread.join(timeout=2.0)))
-        actions.extend((("底盘停车", self.stop), ("底盘释放", self.release),
-                        ("电机串口", self.board.ser.close)))
+        actions.append(("底盘停车", self.stop))
+        if release_motors:
+            actions.append(("底盘释放", self.release))
+        actions.append(("电机串口", self.board.ser.close))
         cleanup(*actions)

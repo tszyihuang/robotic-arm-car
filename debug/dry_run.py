@@ -31,7 +31,7 @@ class DryBase:
     def stop(self):
         pass
 
-    def close(self):
+    def close(self, *, release_motors=True):
         pass
 
 
@@ -40,6 +40,9 @@ class DryArm:
 
     def calibrate(self):
         print("arm.calibrate()  # 读取软件基准，不运动")
+
+    def disable(self):
+        print("arm.disable()  # ID1-4 失能，夹爪保持")
 
     def move_joints(self, q1, q2, q3, q4):
         from arm.config import ArmConfig
@@ -75,6 +78,10 @@ class DryVision:
 
     def observe_target(self, kind, value):
         print(f"vision.observe_target({kind!r}, {value!r})  # 等待三个完整候选连续稳定，不猜位置")
+        return None
+
+    def observe_balls(self):
+        print("vision.observe_balls()  # 等待三个小球顺序连续稳定，打印左、中、右及颜色")
         return None
 
     def close(self):

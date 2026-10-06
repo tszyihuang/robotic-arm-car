@@ -1,5 +1,7 @@
-"""在控制台直接读取四电机与双舵机角度。"""
+"""启动时重建软件零点，按 q1 q2 q3 q4 servo1 servo2 输出角度。"""
 import argparse
+import contextlib
+import io
 import json
 import math
 from pathlib import Path
@@ -12,20 +14,16 @@ if __name__ == '__main__' and not __package__:
 from arm.api import Arm
 from base.control import cleanup
 
+
 def format_angles(data):
-    rows = []
+    values = []
     for addr in ('1', '2', '3', '4'):
         row = data.get('motors', {}).get(addr, {})
-        text = row.get('error', '无读数')
-        if 'encoder_deg' in row:
-            text = f"编码器 {row['encoder_deg']:8.2f}°"
-            text += f" / 关节 {row['joint_deg']:8.2f}°" if 'joint_deg' in row else ' / 未校准'
-        rows.append(f'电机{addr}: {text}')
+        values.append(row.get('joint_deg', float('nan')))
     for addr in ('1', '2'):
         row = data.get('servos', {}).get(addr, {})
-        text = f"{row['angle_deg']:8.2f}°" if 'angle_deg' in row else row.get('error', '无读数')
-        rows.append(f'舵机{addr}: {text}')
-    return ' | '.join(rows)
+        values.append(row.get('angle_deg', float('nan')))
+    return ' '.join(f'{value:.2f}' for value in values)
 
 
 def main(args=None):
@@ -40,17 +38,20 @@ def main(args=None):
         parser.error('--duration 必须是有限非负数')
     arm = Arm()
     try:
+        # 每次启动都以当前位置重建软件基准，沿用配置中的逻辑安装偏置。
+        arm.config.encoder_zero_deg = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            arm.calibrate()
         start = time.monotonic()
         while not opts.duration or time.monotonic() - start < opts.duration:
             tick = time.monotonic()
             data = arm.angles()
-            print(json.dumps(data, ensure_ascii=False) if opts.json else
-                  time.strftime('%H:%M:%S') + ' | ' + format_angles(data), flush=True)
+            print(json.dumps(data, ensure_ascii=False) if opts.json else format_angles(data), flush=True)
             time.sleep(max(0.0, 1 / opts.hz - (time.monotonic() - tick)))
     except KeyboardInterrupt:
         pass
     finally:
-        # 只读调试不校准、不使能、不发送运动或夹爪松开命令。
+        # 软件归零后只读反馈；退出关闭会话。
         cleanup(('机械臂连接', arm.close), raise_errors=False)
     return 0
 

@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 
 from . import pause
+from . import detect_ball
 from base.control import check_cancel
 
 
@@ -15,12 +16,14 @@ COMMANDS = {
     "align": ("base", "align", (0,)),
     "vision-straight": ("base", "vision_straight", (1,)),
     "arm-calibrate": ("arm", "calibrate", (0,)),
+    "arm-disable": ("arm", "disable", (0,)),
     "arm-move": ("arm", "move_joints", (4,)),
     "arm-home": ("arm", "home", (0,)),
     "home": ("arm", "home", (0,)),
     "gripper-open": ("arm", "open_gripper", (0,)),
     "gripper-close": ("arm", "close_gripper", (0,)),
     "scan-qrcode": ("vision", "scan_qrcode", (0,)),
+    "detect-balls": ("vision", "observe_balls", (0,)),
 }
 
 
@@ -74,7 +77,7 @@ def execute(step, base, arm, vision, *, stop_event=None):
     args = step.args
     if step.command in ("align", "vision-straight"):
         args += (vision,)
-    result = getattr(device, method)(*args)
+    result = detect_ball.run(device) if step.command == "detect-balls" else getattr(device, method)(*args)
     check_cancel(stop_event)
     if step.command == "scan-qrcode":
         print(f"  二维码：{result}")

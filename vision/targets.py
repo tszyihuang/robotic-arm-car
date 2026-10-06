@@ -56,13 +56,19 @@ def colored_targets(frame, min_area_ratio=VISION["target_min_area_ratio"]):
     return candidates
 
 
-def choose_position(candidates, value):
+def ordered_candidates(candidates):
+    """三个候选必须完整可见，按检测框中心从左到右排序。"""
     ordered = sorted(candidates, key=lambda row: row['center_x'])
     if len(ordered) != 3:
         raise ValueError(f'需要完整看见三个候选，当前识别到 {len(ordered)} 个')
     centers = [row['center_x'] for row in ordered]
     if centers[1] - centers[0] < 1 or centers[2] - centers[1] < 1:
         raise ValueError('候选位置重叠，无法确定左右顺序')
+    return ordered
+
+
+def choose_position(candidates, value):
+    ordered = ordered_candidates(candidates)
     matches = [i for i, row in enumerate(ordered) if row['value'] == value]
     if len(matches) != 1:
         raise ValueError(f'目标 {value} 必须唯一，当前匹配 {len(matches)} 个')
@@ -77,7 +83,10 @@ def validate_target(kind, value):
 def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
             min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None,
             candidate_source=None):
-    validate_target(kind, value)
+    # ball + None 观察全部小球的顺序，不指定要抓取的颜色。
+    layout_only = kind == 'ball' and value is None
+    if not layout_only:
+        validate_target(kind, value)
     # 不复用移动途中或上一个任务留下的画面。
     with camera.condition:
         index = camera.index
@@ -89,7 +98,10 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
         if remaining <= 0:
             raise TimeoutError(f'目标观察超时：{reason}')
         if candidate_source is not None:
-            candidates, index, stamp = candidate_source(after=index, after_stamp=after_stamp, timeout=remaining)
+            try:
+                candidates, index, stamp = candidate_source(after=index, after_stamp=after_stamp, timeout=remaining)
+            except TimeoutError as exc:
+                raise TimeoutError(f'目标观察超时：{reason}；{exc}') from exc
         else:
             frame, index, stamp = camera.next_frame(after=index, timeout=min(3.0, remaining), stop_event=stop_event)
             if kind == 'target':
@@ -107,7 +119,10 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
             previous, count, reason = None, 0, '推理结果对应画面已过期'
             continue
         try:
-            position, ordered = choose_position(candidates, value)
+            if layout_only:
+                position, ordered = None, ordered_candidates(candidates)
+            else:
+                position, ordered = choose_position(candidates, value)
         except ValueError as exc:
             previous, count, reason = None, 0, str(exc)
             continue

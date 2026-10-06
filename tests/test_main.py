@@ -29,7 +29,7 @@ class Recorder:
         pass
 
     def __getattr__(self, name):
-        def call(*args):
+        def call(*args, **kwargs):
             if name in ("stop", "cancel", "close"):
                 self.cleaned.append(name)
                 return
@@ -54,6 +54,26 @@ class MissionTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
                 main.run(*devices, tasks_path=path)
+
+    def test_task_table_explicit_disable_preserves_gripper_and_allows_next_move(self):
+        for next_move in (False, True):
+            with self.subTest(next_move=next_move):
+                arm = Arm(simulate=True)
+                arm.dry_run = True
+                with contextlib.redirect_stdout(io.StringIO()):
+                    arm.calibrate()
+                    arm.close_gripper()
+                bus, servo = arm._bus, arm._servo
+                servo.disable_torque = Mock(wraps=servo.disable_torque)
+                text = "[主线]\narm-move 10 20 130 40\narm-disable\n"
+                if next_move:
+                    text += "arm-move 20 30 140 50\n"
+                with patch.object(arm, 'disable', wraps=arm.disable) as disable:
+                    self.run_tasks(text, Mock(), arm, Mock())
+                disable.assert_called_once_with()
+                self.assertTrue(all(m.enabled == next_move for m in bus.motors.values()))
+                servo.disable_torque.assert_not_called()
+                self.assertTrue(bus.closed)
 
     def test_main_executes_only_selected_section_in_file_order(self):
         text = """[主线]
@@ -83,7 +103,7 @@ gripper-open
             ("gripper-open", ()), ("gripper-close", ()),
             ("arm-home", ()), ("arm-home", ()), ("scan-qrcode", ()),
         ])
-        self.assertEqual([d.cleaned for d in devices], [["stop", "close"], ["cancel", "close"], ["close"]])
+        self.assertEqual([d.cleaned for d in devices], [["stop", "close"], ["close"], ["close"]])
 
     def test_main_does_not_insert_calibration_scan_or_ball_actions(self):
         trace = []
@@ -164,7 +184,6 @@ gripper-open
             base, arm, vision = Mock(), Mock(), Mock()
             arm.calibrate.side_effect = original
             base.stop.side_effect = OSError("停车失败")
-            arm.cancel.side_effect = OSError("停止失败")
             base.close.side_effect = OSError("串口关闭失败")
             arm.close.side_effect = OSError("舵机关闭失败")
             with contextlib.redirect_stderr(io.StringIO()) as output:
@@ -172,7 +191,9 @@ gripper-open
                     self.run_tasks("[主线]\narm-calibrate\n", base, arm, vision)
             self.assertIs(failed.exception, original)
             vision.close.assert_called_once()
-            self.assertEqual(output.getvalue().count("清理失败"), 4)
+            arm.cancel.assert_not_called()
+            base.close.assert_called_once_with(release_motors=False)
+            self.assertEqual(output.getvalue().count("清理失败"), 3)
 
     def test_dry_run_from_other_directory_without_hardware_or_ros_imports(self):
         script = '''
@@ -204,7 +225,7 @@ base, arm, vision = Mock(), Mock(), Mock()
 arm.calibrate.side_effect = lambda: time.sleep(10)
 base.stop.side_effect = lambda: print('base stopped')
 arm.cancel.side_effect = lambda: print('arm stopped')
-base.close.side_effect = lambda: print('base closed')
+base.close.side_effect = lambda **kwargs: print('base closed')
 arm.close.side_effect = lambda: print('arm closed')
 vision.close.side_effect = lambda: print('vision closed')
 with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_value=arm), patch('vision.api.Vision', return_value=vision), patch('main.load_main', return_value=[Step(1, 'arm-calibrate', ())]):
@@ -214,8 +235,37 @@ with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_valu
         result = subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT,
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 130, result.stderr)
-        for message in ("base stopped", "arm stopped", "base closed", "arm closed", "vision closed"):
+        for message in ("base stopped", "base closed", "arm closed", "vision closed"):
             self.assertIn(message, result.stdout)
+        self.assertNotIn("arm stopped", result.stdout)
+
+    def test_exit_keeps_arm_enabled_and_closes_connections_even_after_vision_error(self):
+        for error in (None, TimeoutError("视觉超时")):
+            with self.subTest(error=error):
+                arm = Arm(simulate=True)
+                arm.dry_run = True
+                base, vision = Mock(), Mock()
+                vision.scan_qrcode.side_effect = error
+                buses = []
+                calibrate = arm.calibrate
+
+                def record_bus():
+                    result = calibrate()
+                    buses.append(arm._bus)
+                    return result
+
+                text = "[主线]\narm-calibrate\narm-move 10 20 130 40\nscan-qrcode\n"
+                with patch.object(arm, 'calibrate', side_effect=record_bus):
+                    if error is None:
+                        self.run_tasks(text, base, arm, vision)
+                    else:
+                        with self.assertRaises(TimeoutError):
+                            self.run_tasks(text, base, arm, vision)
+                self.assertTrue(buses[0].closed)
+                self.assertTrue(all(motor.enabled for motor in buses[0].motors.values()))
+                self.assertIsNone(arm._bus)
+                base.close.assert_called_once_with(release_motors=False)
+                vision.close.assert_called_once()
 
 
 class ArmTests(unittest.TestCase):

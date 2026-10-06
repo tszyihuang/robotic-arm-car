@@ -127,12 +127,12 @@ class Base:
         if self.motor is not None:
             self.motor.stop()
 
-    def close(self):
+    def close(self, *, release_motors=True):
         motor, imu = self.motor, self.imu
         self.motor = self.imu = None
         actions = []
         if motor is not None:
-            actions.append(("底盘连接", motor.close))
+            actions.append(("底盘连接", lambda: motor.close(release_motors=release_motors)))
         if imu is not None:
             actions.append(("IMU 连接", imu.close))
         cleanup(*actions)

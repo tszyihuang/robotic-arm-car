@@ -118,6 +118,16 @@ class Vision:
 
     def observe_target(self, kind, value):
         validate_target(kind, value)
+        result = self._observe(kind, value)
+        return ("left", "middle", "right")[result["position"]]
+
+    def observe_balls(self):
+        """读取后台 YOLO 小球结果，返回连续稳定的左、中、右颜色。"""
+        result = self._observe("ball", None)
+        return [{"position": position, "color": row["value"]}
+                for position, row in zip(("left", "middle", "right"), result["candidates"])]
+
+    def _observe(self, kind, value):
         # 扫码与观察共用相机，串行请求避免分辨率切换污染稳定帧。
         with self._scan_lock:
             camera = self.start_camera()
@@ -145,7 +155,7 @@ class Vision:
                                  stable_frames=self.config["observe_stable_frames"],
                                  stop_event=self.stop_event,
                                  candidate_source=lambda **kwargs: self._wait_candidates(kind, **kwargs))
-                return ("left", "middle", "right")[result["position"]]
+                return result
             finally:
                 self._target_requested.clear()
 
@@ -168,7 +178,14 @@ class Vision:
                         return candidates, index, stamp
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("目标观察超时：后台未返回新的有效识别结果")
+                    detail = "后台尚未完成目标推理"
+                    if cached is not None:
+                        age = max(0.0, self._clock() - stamp)
+                        names = ([row['name'] for row in info] if kind == 'target' else
+                                 [row['name'] for row in info['detections']])
+                        detail = (f"最新帧距采集 {age:.3f}s，新鲜度上限 {self.config['frame_stale']:g}s；"
+                                  f"最新识别类别：{names}")
+                    raise TimeoutError(f"后台未返回新的有效识别结果（{detail}）")
                 self.condition.wait(min(remaining, 0.05))
 
     def set_models(self, *, boundary, objects):

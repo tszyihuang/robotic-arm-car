@@ -12,9 +12,11 @@ python3 main.py --dry-run
 
 干跑与实机读取同一份 `[主线]`。支持空行和 `#` 注释，读到下一个段标题即结束，其他段中的指令不执行。启动时检查整段指令的名称、参数数量和数值格式，错误包含任务表行号。
 
-可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`。扫码只输出识别结果，不自动调用其他段或抓球分支。
+可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`。扫码只输出识别结果，不自动调用其他段或抓球分支。
 
-动作均需在 `[主线]` 明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。
+`detect-balls` 调用 `tasks/detect_ball.py`，复用后台 YOLO 物体模型的小球识别结果。按三个球的检测框中心从左到右排序为左、中、右，颜色直接读取模型类别（红、绿、蓝）。等待三个球完整可见且顺序连续稳定后，逐个打印，例如 `小球位置：左，颜色：红色`；缺球或位置重叠会继续等待，超时后停止。当前主线已在机械臂到达观察姿态后加入该指令。干跑仅打印检测步骤。
+
+动作均需在 `[主线]` 明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂 ID1–4 失能，夹爪保持；无需先校准，已建立的软件零点仍保留。后续位置指令会重新使能。`tasks.txt` 的回位后提供了注释示例，需要执行时取消注释。
 
 运行依赖列在 `requirements.txt`，已验证 Python 3.12 和 Ultralytics 8.4.164。安装依赖时保留本机已匹配的 OpenCV、PyTorch、torchvision 和 CUDA 环境。
 
@@ -37,6 +39,7 @@ python3 main.py
 | `tasks/route.py` | 保留的路线函数，主程序不自动调用 |
 | `tasks/scan.py` | 抬头扫码与回位 |
 | `tasks/ball.py` | 小球观察与夹球动作 |
+| `tasks/detect_ball.py` | 按左、中、右打印 YOLO 小球颜色 |
 | `tasks/target.py`、`tasks/delivery.py` | 待填写的打靶、取放物体动作 |
 | `base/` | 底盘接口与运动控制；`feedback.py` 共用里程和测速，`control.py` 共用取消、等待、日志和清理 |
 | `arm/` | 机械臂会话、四轴控制、串口驱动与舵机绑定 |
@@ -59,7 +62,7 @@ python3 main.py
 
 主任务仍直接调用 `vision.observe_target(kind, value)`、`vision.scan_qrcode()` 或将同一个 `vision` 传给底盘视觉动作。目标观察读取后台结果，等待调用之后的新画面连续稳定，不在主线程重新执行 YOLO。首次调用若模型尚未加载完，最多等待 `VISION['model_wait']` 秒，再按 `observe_timeout` 等待目标；视觉行驶按原逻辑等待新鲜边界。扫码临时暂停 YOLO、切换分辨率，结束后恢复推理，模型仍保留。独立使用 `Vision` 时可先调用 `start()` 提前加载，并在退出时调用 `close()`；`main.py` 已自动处理。
 
-编码器和 IMU 也在后台采集。重复或过期反馈不能延长有效期，编码器增量仅消费一次，反馈或视觉丢失会停车。`Ctrl+C` 取消动作并逐项尝试停车、关闭设备、等待视觉线程退出，清理错误不会覆盖原始异常。
+编码器和 IMU 也在后台采集。重复或过期反馈不能延长有效期，编码器增量仅消费一次，反馈或视觉丢失会停车。主程序结束时，底盘发送零速度并保持闭环，机械臂保留使能和最后位置目标，随后关闭设备连接、等待视觉线程退出；退出清理不发送机械臂失能或底盘零 PWM 释放指令。动作内部遇到错误或取消时，原有停车、失能保护仍生效。清理错误不会覆盖原始异常。
 
 ## 待填写动作
 
@@ -75,8 +78,11 @@ python3 main.py
 python3 -m debug.camera_web --port 8080
 python3 -m debug.angles --hz 5
 python3 -m debug.angles --hz 5 --duration 10 --json
+python3 tasks/detect_ball.py
 bash tests/run.sh -q
 ```
+
+`python3 tasks/detect_ball.py` 独立打开摄像头，只加载物体 YOLO 模型，每秒最多检测并打印两次。终端显示模型路径与类别、每帧识别类别、置信度、中心坐标、小球数量、推理耗时和帧龄；三个球可排序时打印左、中、右颜色，缺球时持续显示当前结果。调试入口立即打印，不等待主线的连续稳定确认。按 `Ctrl+C` 退出并关闭摄像头。支持 `--camera 0`、`--device cpu`、`--conf 0.15`、`--hz 5`、`--once`；`--image screenshots/图片.jpg` 可用已有图片检测一次。也可通过 `python3 -m tasks.detect_ball` 启动。
 
 摄像头和角度调试也可在项目根目录直接运行脚本，或使用绝对路径从任意目录启动：
 
@@ -89,6 +95,6 @@ python3 debug/angles.py --hz 5
 
 点击“截图”会在运行摄像头程序的机器上保存 JPEG，默认目录为项目下的 `screenshots/`，网页显示完整保存路径。可在 `config.py` 的 `VISION['screenshot_dir']` 修改目录。截图目录不上传 Git。网页还支持模型独立开关与扫码。
 
-角度调试只读取四轴电机和舵机 ID1、ID2，不校准、不使能、不发送运动命令；单个设备错误独立显示。
+角度调试每次启动时以当前四轴编码器位置重建软件零点，起始逻辑角为 `0 0 160 24`（由 `ARM['joint_offsets_deg']` 配置）。默认每行只打印六列角度，顺序为 `q1 q2 q3 q4 servo1 servo2`，单位为度，舵机保持绝对角度；缺失读数打印 `nan`。软件归零只建立逻辑基准，不移动机械臂。`--json` 保留完整反馈及单个设备错误详情。
 
 测试使用模拟设备、假串口和假模型结果，不驱动实车；覆盖动作顺序、目标判断、二维码解码、反馈过期、碰撞检测、控制算法及异常清理。实机到位精度和 GPU 推理需要现场验证。

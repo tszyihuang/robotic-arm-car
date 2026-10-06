@@ -18,6 +18,26 @@ from tasks import pause
 
 
 class DeviceConstructionTests(unittest.TestCase):
+    def test_base_close_can_keep_zero_speed_without_releasing_pwm(self):
+        for release_motors in (False, True):
+            with self.subTest(release_motors=release_motors):
+                base = Base()
+                motor = Motor.__new__(Motor)
+                motor.shutdown = threading.Event()
+                motor.stop_event = threading.Event()
+                motor.lock = threading.RLock()
+                motor.thread = None
+                motor.board = Mock()
+                base.motor = motor
+                base.close(release_motors=release_motors)
+                self.assertTrue(motor.shutdown.is_set())
+                motor.board.spd.assert_called_once_with(0, 0, 0, 0)
+                motor.board.ser.close.assert_called_once()
+                if release_motors:
+                    motor.board._send.assert_called_once_with('pwm:0,0,0,0')
+                else:
+                    motor.board._send.assert_not_called()
+
     def test_arm_step_gap_observes_shared_cancellation_event(self):
         stop = threading.Event()
         arm = Arm(stop_event=stop)

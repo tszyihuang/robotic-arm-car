@@ -21,8 +21,9 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None):
             print(f"[主线 {index}/{len(steps)}] {step.command} {args}".rstrip(), flush=True)
             execute(step, base, arm, vision, stop_event=stop_event)
     finally:
-        cleanup(("底盘停车", base.stop), ("机械臂停止", arm.cancel),
-                ("底盘关闭", base.close), ("机械臂关闭", arm.close),
+        # 底盘保持零速度闭环，机械臂保留最后目标；关闭连接时不释放电机。
+        cleanup(("底盘停车", base.stop),
+                ("底盘关闭", lambda: base.close(release_motors=False)), ("机械臂关闭", arm.close),
                 ("视觉关闭", vision.close), raise_errors=False)
 
 
