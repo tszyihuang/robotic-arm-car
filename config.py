@@ -44,8 +44,9 @@ POSITION = {
 
 BALL_POSITION = {
     # 横向误差 px → 前后速度 mm/s；中间球偏左后退、偏右前进。
+    # 保守整定起点：偏差 70 px 时目标速度 10.5 mm/s，接近中心逐渐减速。
     "speed": 30.0, "tolerance_px": 8.0, "stable_frames": 3,
-    "kp": 10, "ki": 0, "kd": 0, "derivative_tau": 0.15,
+    "kp": 0.15, "ki": 0.0, "kd": 0.0, "derivative_tau": 0.15,
     "accel": 100.0, "loop_hz": 100.0,
     "settle": 0.2, "speed_tolerance": 5.0, "lost_timeout": 0.6,
     "max_distance_m": 0.3, "timeout": 30.0,

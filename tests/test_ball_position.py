@@ -108,14 +108,14 @@ class SimulatedRobot:
 
 class PositionPIDTests(unittest.TestCase):
     def test_integrates_over_capture_interval_and_filters_derivative(self):
-        pid = PositionPID(validate_config())
+        pid = PositionPID(validate_config({"kp": 0.6, "ki": 0.02, "kd": 0.08, "speed": 30}))
         self.assertAlmostEqual(pid.step(20, 100), 12)
         self.assertAlmostEqual(pid.step(30, 100.1), 18 + 3.2 + 0.06)
         self.assertAlmostEqual(pid.integral, 0.06)
         self.assertAlmostEqual(pid.derivative, 40)
 
     def test_saturated_error_does_not_wind_up_and_crossing_resets_integral(self):
-        pid = PositionPID(validate_config({"ki": 1, "kd": 0}))
+        pid = PositionPID(validate_config({"kp": 0.6, "ki": 1, "kd": 0, "speed": 30}))
         for i in range(100):
             self.assertEqual(pid.step(100, 100 + i / 10), 30)
         self.assertEqual(pid.integral, 0)
