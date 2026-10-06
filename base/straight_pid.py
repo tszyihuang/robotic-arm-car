@@ -3,7 +3,7 @@ import csv
 import math
 import time
 
-from control import cleanup, check_cancel
+from .control import cleanup, check_cancel
 from config import BASE, STRAIGHT
 
 __all__ = ["PID", "straight"]

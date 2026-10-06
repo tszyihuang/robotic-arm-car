@@ -8,8 +8,8 @@ from .errors import ArmError, MotionTimeout, ProtocolError
 from .joints import validate_joints
 from .motor import MotorBus, SimulatedBus, check_fault, position_payload
 from .servo import FeetechSTSServo, MODE
-from control import MotionCancelled, check_cancel as _check_cancel
-from control import cleanup
+from base.control import MotionCancelled, check_cancel as _check_cancel
+from base.control import cleanup
 
 
 class Arm:

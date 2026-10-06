@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from vision.api import Vision
-from control import cleanup
+from base.control import cleanup
 
 
 class CameraHandler(BaseHTTPRequestHandler):

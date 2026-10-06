@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from config import SENSOR, POSITION
 
 import serial
-from control import MotionCancelled, check_cancel
-from control import cleanup
+from base.control import MotionCancelled, check_cancel
+from base.control import cleanup
 
 H1, H2 = 0x7E, 0x23
 FUNC_QUAT, FUNC_RAW = 0x16, 0x04

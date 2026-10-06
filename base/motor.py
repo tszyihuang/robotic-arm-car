@@ -85,7 +85,7 @@ class SerialBoard:
         cleanup(('电机停车', self.stop), ('电机串口', self.ser.close))
 
 
-from control import MotionCancelled, check_cancel, cleanup
+from .control import MotionCancelled, check_cancel, cleanup
 import threading
 import glob
 

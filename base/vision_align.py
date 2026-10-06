@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from . import straight_pid
 from config import BASE, ALIGN
 IMU_STALE = BASE["feedback_stale"]
-from control import cleanup, check_cancel
+from .control import cleanup, check_cancel
 from .vision_straight import (ImuSource, VisionHeading, WheelGapSource,
                              clamp, make_heading_loop)
 

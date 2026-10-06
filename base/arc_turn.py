@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import math
 import time
 
-from control import cleanup, check_cancel, wait_cancelable
+from .control import cleanup, check_cancel, wait_cancelable
 from config import BASE, TURN
 
 COUNTS_PER_METER = TURN["COUNTS_PER_METER"]

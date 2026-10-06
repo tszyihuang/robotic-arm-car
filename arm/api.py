@@ -4,7 +4,7 @@ import warnings
 import threading
 import time
 
-from control import MotionCancelled, check_cancel, cleanup
+from base.control import MotionCancelled, check_cancel, cleanup
 from .config import ArmConfig
 
 

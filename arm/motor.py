@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .config import JOINT_IDS, finite
 from .errors import MotorFault, ProtocolError
-from control import cleanup
+from base.control import cleanup
 
 ANGLE_SCALE = 360.0 / 16384
 

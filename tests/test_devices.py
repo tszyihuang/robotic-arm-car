@@ -12,7 +12,7 @@ from base.motor import Motor, SerialBoard
 from base import straight_pid, arc_turn, calibrate_position
 from sensor.imu import ImuLink, FUNC_RAW, FUNC_QUAT
 from vision.api import Vision
-from control import MotionCancelled
+from base.control import MotionCancelled
 from tasks import pause
 
 

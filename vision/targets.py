@@ -3,7 +3,7 @@ import math
 import time
 
 from config import VISION
-from control import check_cancel
+from base.control import check_cancel
 from .qrcode import COLORS, SHAPES
 
 LABELS = {"红球": ("ball", "red"), "绿球": ("ball", "green"), "蓝球": ("ball", "blue"),

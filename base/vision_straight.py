@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from . import straight_pid
 from config import BASE, STRAIGHT, VISION_CONTROL
 IMU_STALE = BASE["feedback_stale"]
-from control import cleanup, check_cancel, wait_cancelable
+from .control import cleanup, check_cancel, wait_cancelable
 
 # ============================== 默认参数 ==============================
 

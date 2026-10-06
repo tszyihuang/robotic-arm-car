@@ -26,7 +26,6 @@ python3 main.py
 car/
 ├── main.py             比赛主线
 ├── config.py           端口、控制参数、机械臂限位和模型路径
-├── control.py          取消、等待和逐项清理
 ├── requirements.txt    运行依赖
 ├── README.md           运行与调试说明
 ├── tasks/              比赛任务
@@ -36,6 +35,7 @@ car/
 │   ├── target.py       打靶动作，待填写
 │   └── delivery.py     取放物体动作，待填写
 ├── base/               底盘接口、算法及电机驱动
+│   └── control.py      取消、等待和逐项清理
 ├── arm/                机械臂会话、驱动、校验、舵机绑定和许可证
 ├── vision/             摄像头、识别及直接反馈
 │   └── models/         跑道与物体两套模型

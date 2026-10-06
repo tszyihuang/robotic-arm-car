@@ -5,7 +5,7 @@ import math
 import time
 
 from arm.api import Arm
-from control import cleanup
+from base.control import cleanup
 
 def format_angles(data):
     rows = []

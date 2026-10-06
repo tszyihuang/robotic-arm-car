@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 from base import straight_pid
-from control import MotionCancelled
+from base.control import MotionCancelled
 
 
 class ControllerTests(unittest.TestCase):

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from arm.api import Arm as ArmSession
-from control import MotionCancelled
+from base.control import MotionCancelled
 from vision.qrcode import mission_code
 from vision.targets import candidates_from_detections, choose_position, colored_targets, observe
 

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import main
 from tasks import ball, target, delivery
 from arm.api import Arm
-from control import MotionCancelled
+from base.control import MotionCancelled
 
 ROOT = Path(__file__).resolve().parents[1]
 

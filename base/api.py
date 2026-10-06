@@ -2,7 +2,7 @@
 import math
 import threading
 
-from control import check_cancel, cleanup, wait_cancelable
+from .control import check_cancel, cleanup, wait_cancelable
 from . import straight_pid, arc_turn, calibrate_position, vision_align, vision_straight
 from config import BASE, SENSOR, ARM, POSITION, VISION
 

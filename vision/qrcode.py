@@ -3,7 +3,7 @@ import time
 import re
 
 from config import VISION
-from control import check_cancel
+from base.control import check_cancel
 
 COLORS = ("red", "green", "blue")
 SHAPES = ("cylinder", "cone", "drum")

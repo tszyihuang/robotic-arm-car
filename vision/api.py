@@ -4,7 +4,7 @@ import threading
 import time
 
 from config import VISION
-from control import check_cancel, cleanup, MotionCancelled
+from base.control import check_cancel, cleanup, MotionCancelled
 from base.vision_straight import BoundarySample
 from .camera import CameraStream
 from .qrcode import scan_qrcode

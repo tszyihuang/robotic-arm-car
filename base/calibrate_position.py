@@ -7,7 +7,7 @@ from . import straight_pid as straight
 from sensor.imu import ImpactDetector, AccelState
 from config import BASE, POSITION
 IMU_STALE = BASE["feedback_stale"]
-from control import cleanup, check_cancel, wait_cancelable
+from .control import cleanup, check_cancel, wait_cancelable
 
 
 BOOT_WAIT = POSITION["boot_wait"]             # 倒车靠坎不额外等待 IMU 启动；仍检查原始加速度是否就绪

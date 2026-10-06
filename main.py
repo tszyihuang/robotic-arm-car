@@ -4,7 +4,7 @@ import signal
 import threading
 
 from tasks import route, scan, ball, pause
-from control import cleanup, MotionCancelled
+from base.control import cleanup, MotionCancelled
 
 
 def run(base, arm, vision):
