@@ -85,7 +85,7 @@ def set_serial_latency(serial_port, latency_ms=1):
             raise OSError(f"设置后回读为 {current} ms")
     except (OSError, ValueError) as exc:
         warnings.warn(f"USB 串口延迟未能设为 {latency_ms} ms（当前 {current} ms）：{exc}。"
-                      "请使用 sudo 启动，以写入 latency_timer。", RuntimeWarning)
+                      "驱动将继续使用当前延迟。", RuntimeWarning)
     return current
 
 
@@ -121,7 +121,8 @@ class MotorBus:
         if serial_port is None:
             import serial  # 仿真和纯运动学不依赖 pyserial。
             serial_port = serial.Serial(port, baudrate=baudrate, timeout=min(timeout, 0.02),
-                                        write_timeout=timeout, bytesize=8, parity="N", stopbits=1)
+                                        write_timeout=timeout, bytesize=8, parity="N", stopbits=1,
+                                        exclusive=True)
         self._ser = serial_port
         try:
             self.latency_ms = set_serial_latency(serial_port, latency_ms)
@@ -130,15 +131,56 @@ class MotorBus:
             cleanup(('四轴串口连接', serial_port.close))
             raise
 
-    def _read_exact(self, size, deadline):
-        result = bytearray()
-        while len(result) < size and time.monotonic() < deadline:
-            chunk = self._ser.read(size - len(result))
-            if chunk:
-                result.extend(chunk)
-        if len(result) != size:
-            raise ProtocolError(f"RS485 应答超时：需要 {size} 字节，收到 {len(result)}")
-        return bytes(result)
+    def _read_response(self, address, cmd, deadline):
+        """按字节流找本次应答；调度超时后仍检查已经到达串口缓冲区的数据。"""
+        expected = bytes((0xAC, self._seq, address, cmd))
+        buffer = bytearray()
+        sample = bytearray()
+        received = 0
+        last_error = None
+        drained_after_deadline = False
+        while True:
+            while True:
+                start = buffer.find(expected)
+                if start < 0:
+                    # 保留可能跨两次 read 的帧头前缀。
+                    del buffer[:-3]
+                    break
+                del buffer[:start]
+                if len(buffer) < 5:
+                    break
+                if buffer[4] > 64:
+                    last_error = "响应数据长度异常"
+                    del buffer[0]
+                    continue
+                size = buffer[4] + 7
+                if len(buffer) < size:
+                    break
+                frame = bytes(buffer[:size])
+                if crc16(frame[:-2]) != struct.unpack("<H", frame[-2:])[0]:
+                    last_error = "CRC16 校验失败"
+                    del buffer[0]
+                    continue
+                return frame[5:-2]
+
+            remaining = deadline - time.monotonic()
+            waiting = self._ser.in_waiting
+            if remaining <= 0 and (not waiting or drained_after_deadline):
+                detail = (f"完整帧需要 {buffer[4] + 7} 字节，当前 {len(buffer)} 字节"
+                          if len(buffer) >= 5 else "未收到匹配的完整帧")
+                if last_error:
+                    detail += f"；{last_error}"
+                raise ProtocolError(f"RS485 应答超时：{detail}；累计收到 {received} 字节；"
+                                    f"接收片段 {sample.hex(' ').upper() or '无'}")
+            if remaining <= 0:
+                # 只补读一次当前已到达的数据，避免噪声持续输入导致无限等待。
+                drained_after_deadline = True
+            if not waiting:
+                self._ser.timeout = min(0.02, remaining)
+            chunk = self._ser.read(min(waiting, 4096) if waiting else 1)
+            buffer.extend(chunk)
+            received += len(chunk)
+            sample.extend(chunk[:max(0, 64 - len(sample))])
 
     def exchange(self, address, cmd, data=b""):
         if address not in JOINT_IDS or not 0 <= cmd <= 255 or len(data) > 248:
@@ -146,26 +188,22 @@ class MotorBus:
         with self._lock:
             if self._closed:
                 raise ProtocolError("RS485 总线已关闭")
-            self._seq = (self._seq + 1) & 0xFF
-            frame = bytes((0xAE, self._seq, address, cmd, len(data))) + data
-            frame += struct.pack("<H", crc16(frame))
-            try:
-                self._ser.reset_input_buffer()
-                if self._ser.write(frame) != len(frame):
-                    raise ProtocolError("串口未完整发送命令")
-                self._ser.flush()
-                deadline = time.monotonic() + self.timeout
-                head = self._read_exact(5, deadline)
-                if head[:4] != bytes((0xAC, self._seq, address, cmd)):
-                    raise ProtocolError("响应帧头、包序号、设备地址或命令码不匹配")
-                if head[4] > 64:
-                    raise ProtocolError("响应数据长度异常")
-                tail = self._read_exact(head[4] + 2, deadline)
-                if crc16(head + tail[:-2]) != struct.unpack("<H", tail[-2:])[0]:
-                    raise ProtocolError("CRC16 校验失败")
-                return tail[:-2]
-            except (OSError, ProtocolError) as exc:
-                raise ProtocolError(f"ID{address} 命令 0x{cmd:02X}: {exc}") from exc
+            # 仅重试无副作用的状态查询；每次使用新序号，排除迟到的旧应答。
+            attempts = 3 if cmd == 0x0B else 1
+            for attempt in range(attempts):
+                self._seq = (self._seq + 1) & 0xFF
+                frame = bytes((0xAE, self._seq, address, cmd, len(data))) + data
+                frame += struct.pack("<H", crc16(frame))
+                try:
+                    self._ser.reset_input_buffer()
+                    if self._ser.write(frame) != len(frame):
+                        raise ProtocolError("串口未完整发送命令")
+                    self._ser.flush()
+                    return self._read_response(address, cmd, time.monotonic() + self.timeout)
+                except (OSError, ProtocolError) as exc:
+                    if isinstance(exc, OSError) or attempt == attempts - 1:
+                        suffix = f"（状态查询已尝试 {attempt + 1} 次）" if cmd == 0x0B else ""
+                        raise ProtocolError(f"ID{address} 命令 0x{cmd:02X}: {exc}{suffix}") from exc
 
     def disable_all(self):
         failures = []

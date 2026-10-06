@@ -127,7 +127,46 @@ class Vision:
         return [{"position": position, "color": row["value"]}
                 for position, row in zip(("left", "middle", "right"), result["candidates"])]
 
-    def _observe(self, kind, value):
+    def observe_ball_layout(self, *, timeout=None):
+        """读取调用后新帧的三个球坐标及同一原图尺寸，供位置校准使用。"""
+        return self._observe("ball", None, timeout=timeout, stable_frames=1, include_size=True)
+
+    def ball_layout_sample(self):
+        """非阻塞读取最新物体推理；保留缺球帧，让连续控制及时停车。"""
+        with self.condition:
+            self._check_open()
+            if self.camera is not None and self.camera.error:
+                raise RuntimeError(self.camera.error)
+            if self._state == "error":
+                raise RuntimeError(self._error)
+            if self._objects is None or not self._enabled["objects"] or self._scanning.is_set():
+                return None
+            info, index, stamp = self._objects
+            if not -0.1 <= self._clock() - stamp < self.config["frame_stale"]:
+                return None
+            return {"size": info.get("size"), "candidates": candidates_from_detections(info["detections"], "ball"),
+                    "frame_index": index, "capture_stamp": stamp}
+
+    def wait_ball_layout(self, *, after, timeout, stop_event=None):
+        """新物体结果发布即唤醒；到控制周期截止仍无新结果时返回 None。"""
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("等待小球结果的时间必须为有限非负数")
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                check_cancel(stop_event)
+                sample = self.ball_layout_sample()
+                if sample is not None and sample["frame_index"] != after:
+                    return sample
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.condition.wait(min(remaining, 0.05))
+
+    def _observe(self, kind, value, *, timeout=None, stable_frames=None, include_size=False):
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("观察超时必须为有限正数")
+        deadline = None if timeout is None else time.monotonic() + timeout
         # 扫码与观察共用相机，串行请求避免分辨率切换污染稳定帧。
         with self._scan_lock:
             camera = self.start_camera()
@@ -137,29 +176,35 @@ class Vision:
                 self.set_models(boundary=enabled["boundary"],
                                 objects=enabled["objects"] or kind != "target")
             if kind != "target":
-                deadline = time.monotonic() + self.config["model_wait"]
+                model_deadline = time.monotonic() + self.config["model_wait"]
+                if deadline is not None:
+                    model_deadline = min(model_deadline, deadline)
                 with self.condition:
                     while self._object_model is None:
                         self._check_open()
                         if self._state == "error":
                             raise RuntimeError(self._error)
-                        remaining = deadline - time.monotonic()
+                        remaining = model_deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError("等待目标模型加载超时")
                         self.condition.wait(min(remaining, 0.05))
             else:
                 self._target_requested.set()
             try:
+                remaining = self.config["observe_timeout"] if deadline is None else deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("目标观察超时")
                 result = observe(camera, kind, value,
-                                 timeout=self.config["observe_timeout"],
-                                 stable_frames=self.config["observe_stable_frames"],
+                                 timeout=remaining,
+                                 stable_frames=self.config["observe_stable_frames"] if stable_frames is None else stable_frames,
                                  stop_event=self.stop_event,
-                                 candidate_source=lambda **kwargs: self._wait_candidates(kind, **kwargs))
+                                 candidate_source=lambda **kwargs: self._wait_candidates(
+                                     kind, include_size=include_size, **kwargs))
                 return result
             finally:
                 self._target_requested.clear()
 
-    def _wait_candidates(self, kind, *, after, after_stamp, timeout):
+    def _wait_candidates(self, kind, *, after, after_stamp, timeout, include_size=False):
         """读取调用之后的新帧，稳定计数不能重复消费同一份结果。"""
         deadline = time.monotonic() + timeout
         with self.condition:
@@ -175,6 +220,8 @@ class Vision:
                     if (index > after and stamp > after_stamp
                             and self._clock() - stamp <= self.config["frame_stale"]):
                         candidates = info if kind == "target" else candidates_from_detections(info["detections"], kind)
+                        if include_size:
+                            return candidates, index, stamp, info.get("size")
                         return candidates, index, stamp
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -264,10 +311,17 @@ class Vision:
                     self._check_open()
                     if self._scanning.is_set() or stamp < self._frame_cutoff:
                         continue
-                    if enabled["boundary"]:
-                        geometry = self._boundary_model.predict(frame)
                     if enabled["objects"]:
                         detections = self._object_model.predict(frame)
+                        with self.condition:
+                            if (generation != self._model_generation or self._scanning.is_set()
+                                    or self._closed):
+                                continue
+                            # 物体推理完成即交给控制端，后续边界推理单独执行。
+                            self._objects = (detections, index, stamp)
+                            self.condition.notify_all()
+                    if enabled["boundary"]:
+                        geometry = self._boundary_model.predict(frame)
                     if self._target_requested.is_set():
                         targets = colored_targets(frame, self.config["target_min_area_ratio"])
                     with self.condition:
@@ -277,11 +331,9 @@ class Vision:
                         if geometry is not None and self._enabled["boundary"]:
                             self.ingest_boundary(geometry, index, stamp,
                                                  inference_seconds=geometry["timing_ms"]["total"] / 1000)
-                        if detections is not None and self._enabled["objects"]:
-                            self._objects = (detections, index, stamp)
                         if targets is not None:
                             self._targets = (targets, index, stamp)
-                        # 同一帧的全部模型执行完才发布；只保留最新完成帧，不排队。
+                        # 网页预览等本帧全部模型完成再更新，保证检测框与边界对应原图。
                         self._preview = (frame, stamp, geometry, detections)
                         self._state = "ready" if any(self._enabled.values()) else "off"
                         self._error = ""

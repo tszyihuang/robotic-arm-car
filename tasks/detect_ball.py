@@ -56,11 +56,11 @@ def main(args=None):
     parser.add_argument("--camera", default=VISION["device"], help="摄像头编号或 /dev/video 路径")
     parser.add_argument("--device", default=VISION["infer_device"], help="推理设备，例如 cuda:0 或 cpu")
     parser.add_argument("--conf", type=float, default=None, help="检测置信度阈值，默认读取模型配置")
-    parser.add_argument("--hz", type=float, default=2.0, help="最高检测与打印频率，默认 2 Hz")
+    parser.add_argument("--hz", type=float, default=None, help="可选的最高检测与打印频率；默认推理完成立即输出")
     parser.add_argument("--once", action="store_true", help="检测一帧后退出")
     parser.add_argument("--image", type=Path, help="检测已有图片一次，替代摄像头")
     opts = parser.parse_args(args)
-    if not math.isfinite(opts.hz) or opts.hz <= 0:
+    if opts.hz is not None and (not math.isfinite(opts.hz) or opts.hz <= 0):
         parser.error("--hz 必须为有限正数")
     if opts.conf is not None and (not math.isfinite(opts.conf) or not 0 < opts.conf < 1):
         parser.error("--conf 必须在 (0, 1) 内")
@@ -96,7 +96,8 @@ def main(args=None):
             print_debug(predictor.predict(frame), frame_index=index, capture_stamp=stamp)
             if opts.once:
                 return 0
-            time.sleep(max(0.0, 1 / opts.hz - (time.monotonic() - start)))
+            if opts.hz is not None:
+                time.sleep(max(0.0, 1 / opts.hz - (time.monotonic() - start)))
     except KeyboardInterrupt:
         print("检测调试已结束。", flush=True)
     except Exception as exc:

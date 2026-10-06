@@ -42,6 +42,81 @@ class ContinuousCamera:
 
 
 class VisionApiTests(unittest.TestCase):
+    def test_ball_results_wake_waiter_while_boundary_inference_is_still_running(self):
+        camera, vision = ContinuousCamera(), Vision()
+        boundary_started, release_boundary, delivered = [threading.Event() for _ in range(3)]
+        objects = {'size': [600, 240], 'detections': [
+            {'name': name, 'box': [x - 20, 10, x + 20, 50]}
+            for name, x in (('红球', 150), ('绿球', 300), ('蓝球', 450))]}
+        geometry = {'size': [600, 240], 'left': {'a': -0.3, 'b': 200},
+                    'right': {'a': 0.3, 'b': 400}, 'timing_ms': {'total': 1}}
+        results = []
+
+        def boundary(frame):
+            boundary_started.set()
+            if not release_boundary.wait(2):
+                raise RuntimeError('测试边界推理未释放')
+            return geometry
+
+        def wait():
+            try:
+                results.append(vision.wait_ball_layout(after=0, timeout=1))
+            except Exception as exc:
+                results.append(exc)
+            finally:
+                delivered.set()
+
+        vision._object_model = Mock()
+        vision._object_model.predict.return_value = objects
+        vision._boundary_model = Mock()
+        vision._boundary_model.predict.side_effect = boundary
+        consumer = threading.Thread(target=wait)
+        try:
+            with patch('vision.api.CameraStream', return_value=camera):
+                vision.start()
+                consumer.start()
+                self.assertTrue(boundary_started.wait(1))
+                self.assertTrue(delivered.wait(1), '小球结果应在边界推理完成前返回')
+                self.assertIsInstance(results[0], dict)
+                self.assertEqual(results[0]['frame_index'], 1)
+                self.assertEqual([ball['center_x'] for ball in results[0]['candidates']], [150, 300, 450])
+                self.assertEqual(vision.ball_layout_sample()['frame_index'], 1)
+                self.assertIsNone(vision._preview, '网页画面仍需匹配同一帧的所有结果')
+        finally:
+            release_boundary.set()
+            vision.close()
+            if consumer.ident is not None:
+                consumer.join(timeout=1)
+
+    def test_wait_ball_layout_times_out_on_duplicate_and_wakes_on_cancellation(self):
+        vision = Vision()
+        vision.camera = Mock(error='')
+        vision._enabled['objects'] = True
+        vision._objects = ({'size': [600, 240], 'detections': []}, 1, time.time())
+        delivered, errors, stop = threading.Event(), [], threading.Event()
+
+        def wait():
+            try:
+                vision.wait_ball_layout(after=1, timeout=10, stop_event=stop)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                delivered.set()
+
+        consumer = threading.Thread(target=wait)
+        try:
+            self.assertIsNone(vision.wait_ball_layout(after=1, timeout=0))
+            consumer.start()
+            stop.set()
+            with vision.condition:
+                vision.condition.notify_all()
+            self.assertTrue(delivered.wait(1))
+            self.assertIsInstance(errors[0], MotionCancelled)
+        finally:
+            vision.close()
+            if consumer.ident is not None:
+                consumer.join(timeout=1)
+
     def test_start_loads_once_in_background_and_repeated_calls_keep_models_and_thread(self):
         camera = ContinuousCamera()
         vision = Vision()

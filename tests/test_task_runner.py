@@ -29,6 +29,7 @@ class TaskParserTests(unittest.TestCase):
 
     def test_invalid_command_arity_and_nonfinite_numbers_report_line(self):
         for command in ("未知 1", "straight", "align 1", "turn 44 0.24 150",
-                        "arm-move 0 0 160", "arm-disable 1", "straight nan", "turn inf", "turn 错误"):
+                        "arm-move 0 0 160", "arm-disable 1", "calibrate-ball-position 1",
+                        "straight nan", "turn inf", "turn 错误"):
             with self.subTest(command=command), self.assertRaisesRegex(ValueError, "tasks.txt:3"):
                 self.parse(f"[主线]\nstraight 0.48\n{command}\n")

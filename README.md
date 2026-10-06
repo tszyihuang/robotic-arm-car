@@ -12,9 +12,11 @@ python3 main.py --dry-run
 
 干跑与实机读取同一份 `[主线]`。支持空行和 `#` 注释，读到下一个段标题即结束，其他段中的指令不执行。启动时检查整段指令的名称、参数数量和数值格式，错误包含任务表行号。
 
-可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`。扫码只输出识别结果，不自动调用其他段或抓球分支。
+可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`。扫码只输出识别结果，不自动调用其他段或抓球分支。
 
 `detect-balls` 调用 `tasks/detect_ball.py`，复用后台 YOLO 物体模型的小球识别结果。按三个球的检测框中心从左到右排序为左、中、右，颜色直接读取模型类别（红、绿、蓝）。等待三个球完整可见且顺序连续稳定后，逐个打印，例如 `小球位置：左，颜色：红色`；缺球或位置重叠会继续等待，超时后停止。当前主线已在机械臂到达观察姿态后加入该指令。干跑仅打印检测步骤。
+
+`calibrate-ball-position` 无参数，已放在主线 `detect-balls` 后、机械臂回位前。按三个球的检测框中心横坐标取中间球，以同一帧原图宽度的一半作为屏幕中心线；中间球偏左就后退，偏右就前进。视觉位置 PID 将横向偏差转换成前后速度，随误差减小而减速；100 Hz 底盘控制环持续读取编码器，用左右里程差 PID 保持直行、轮速 PI 跟踪目标速度，最终轮速指令限制加速度，移动过程中持续读取后台 YOLO，无需逐段停车。物体 YOLO 优先执行，推理完成立即发布坐标并唤醒校准控制环；校准日志随每个新结果输出，附帧号、帧龄和有效性状态。视觉 PID 只在新帧到达时更新，微分采用低通滤波，积分限幅并在饱和时停止积累；进入容差后清除积分并减速至零。球心偏差在 ±8 px 内连续确认 3 个新帧，轮速低于 5 mm/s 且静止保持 0.2 s 后完成。缺球立即停车，恢复新帧后继续；视觉超过 0.6 s 无有效结果、编码器断流、中间球颜色变化、超时或取消都会停止任务。PID 增益、最大速度（默认 30 mm/s）、加速度、容差、稳定帧数、累计移动上限（默认 0.3 m）和超时（默认 30 s）在 `config.py` 的 `BALL_POSITION` 调整。`kp` 单位是 mm/s/px，`ki` 是 mm/s/(px·s)，`kd` 是 mm/s/(px/s)，`derivative_tau` 是微分滤波时间常数（s）。干跑会显示 PID 参数。原 `calibrate-position` 仍是 IMU 撞击检测的倒车靠坎。
 
 动作均需在 `[主线]` 明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂 ID1–4 失能，夹爪保持；无需先校准，已建立的软件零点仍保留。后续位置指令会重新使能。`tasks.txt` 的回位后提供了注释示例，需要执行时取消注释。
 
@@ -40,6 +42,7 @@ python3 main.py
 | `tasks/scan.py` | 抬头扫码与回位 |
 | `tasks/ball.py` | 小球观察与夹球动作 |
 | `tasks/detect_ball.py` | 按左、中、右打印 YOLO 小球颜色 |
+| `tasks/calibrate_ball_position.py`、`base/ball_position.py` | 小球校准任务入口与连续 PID 位置控制 |
 | `tasks/target.py`、`tasks/delivery.py` | 待填写的打靶、取放物体动作 |
 | `base/` | 底盘接口与运动控制；`feedback.py` 共用里程和测速，`control.py` 共用取消、等待、日志和清理 |
 | `arm/` | 机械臂会话、四轴控制、串口驱动与舵机绑定 |
@@ -82,7 +85,7 @@ python3 tasks/detect_ball.py
 bash tests/run.sh -q
 ```
 
-`python3 tasks/detect_ball.py` 独立打开摄像头，只加载物体 YOLO 模型，每秒最多检测并打印两次。终端显示模型路径与类别、每帧识别类别、置信度、中心坐标、小球数量、推理耗时和帧龄；三个球可排序时打印左、中、右颜色，缺球时持续显示当前结果。调试入口立即打印，不等待主线的连续稳定确认。按 `Ctrl+C` 退出并关闭摄像头。支持 `--camera 0`、`--device cpu`、`--conf 0.15`、`--hz 5`、`--once`；`--image screenshots/图片.jpg` 可用已有图片检测一次。也可通过 `python3 -m tasks.detect_ball` 启动。
+`python3 tasks/detect_ball.py` 独立打开摄像头，只加载物体 YOLO 模型，默认推理完成立即打印并读取下一帧。终端显示模型路径与类别、每帧识别类别、置信度、中心坐标、小球数量、推理耗时和帧龄；三个球可排序时打印左、中、右颜色，缺球时持续显示当前结果。调试入口立即打印，不等待主线的连续稳定确认。按 `Ctrl+C` 退出并关闭摄像头。支持 `--camera 0`、`--device cpu`、`--conf 0.15`、`--once`；显式传入 `--hz 5` 可限制最高频率，`--image screenshots/图片.jpg` 可用已有图片检测一次。也可通过 `python3 -m tasks.detect_ball` 启动。
 
 摄像头和角度调试也可在项目根目录直接运行脚本，或使用绝对路径从任意目录启动：
 

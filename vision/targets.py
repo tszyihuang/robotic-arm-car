@@ -99,11 +99,14 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
             raise TimeoutError(f'目标观察超时：{reason}')
         if candidate_source is not None:
             try:
-                candidates, index, stamp = candidate_source(after=index, after_stamp=after_stamp, timeout=remaining)
+                sample = candidate_source(after=index, after_stamp=after_stamp, timeout=remaining)
+                candidates, index, stamp = sample[:3]
+                size = sample[3] if len(sample) == 4 else None
             except TimeoutError as exc:
                 raise TimeoutError(f'目标观察超时：{reason}；{exc}') from exc
         else:
             frame, index, stamp = camera.next_frame(after=index, timeout=min(3.0, remaining), stop_event=stop_event)
+            size = None
             if kind == 'target':
                 candidates = colored_targets(frame, min_area_ratio)
             else:
@@ -114,6 +117,7 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
                         check_cancel(stop_event)
                         info = predictor.predict(frame)
                 candidates = candidates_from_detections(info['detections'], kind)
+                size = info.get('size')
         check_cancel(stop_event)
         if time.time() - stamp > VISION["frame_stale"]:
             previous, count, reason = None, 0, '推理结果对应画面已过期'
@@ -131,4 +135,5 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
         previous = signature
         if count >= stable_frames:
             return {'ok': True, 'kind': kind, 'value': value, 'position': position,
-                    'candidates': ordered, 'frame_index': index, 'capture_stamp': stamp}
+                    'candidates': ordered, 'frame_index': index, 'capture_stamp': stamp,
+                    'size': size}

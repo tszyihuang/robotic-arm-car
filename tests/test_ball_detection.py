@@ -24,6 +24,35 @@ def detections(names):
 
 
 class BallDetectionTests(unittest.TestCase):
+    def test_debug_stream_returns_each_inference_without_a_default_rate_limit(self):
+        for args in ([], ["--hz", "2"]):
+            with self.subTest(args=args):
+                predictor = Mock(names={0: "红球"}, threshold=0.25)
+                camera = Mock(device=0, resolution=(1280, 720))
+                frames = [object(), object()]
+                camera.next_frame.side_effect = [(frame, i, time.time())
+                                                  for i, frame in enumerate(frames, 1)] + [KeyboardInterrupt()]
+                order = []
+
+                def predict(frame):
+                    order.append(('infer', frame))
+                    return {'frame': frame}
+
+                def publish(info, **kwargs):
+                    order.append(('publish', info['frame']))
+
+                predictor.predict.side_effect = predict
+                with patch('vision.yolo_objects.ObjectPredictor', return_value=predictor), \
+                        patch('vision.camera.CameraStream', return_value=camera), \
+                        patch('tasks.detect_ball.print_debug', side_effect=publish), \
+                        patch('tasks.detect_ball.time.sleep') as sleep, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(detect_ball.main(args), 0)
+                self.assertEqual(order, [('infer', frames[0]), ('publish', frames[0]),
+                                         ('infer', frames[1]), ('publish', frames[1])])
+                self.assertEqual(sleep.call_count, 2 if args else 0)
+                camera.close.assert_called_once()
+
     def test_debug_prints_partial_raw_detections_without_assigning_positions(self):
         info = {"detections": [{"name": "绿球", "confidence": 0.9, "box": [10, 20, 50, 80]},
                                {"name": "圆柱", "confidence": 0.8, "box": [70, 20, 110, 80]}],
