@@ -1,5 +1,5 @@
 """只打印动作的设备；与实机共用 tasks.txt 的 [主线] 指令。"""
-from config import BASE, ARM, VISION, POSITION, ALIGN
+from config import BASE, ARM, VISION, POSITION, ALIGN, VISION_CONTROL
 
 
 class DryBase:
@@ -23,7 +23,10 @@ class DryBase:
               f"rate_source={BASE['align_rate_src']!r})")
 
     def vision_straight(self, distance, vision):
-        print(f"base.vision_straight({distance:g} m, {BASE['speed']:g} mm/s)")
+        finish = VISION_CONTROL['GAP_FINISH_MM'] / 1000
+        detail = ("全程 gap 保持起步航向" if distance <= finish else
+                  f"剩余 ≤ {finish:g} m 切换 gap 保持当时航向")
+        print(f"base.vision_straight({distance:g} m, {BASE['speed']:g} mm/s)  # {detail}")
 
     def stop(self):
         pass

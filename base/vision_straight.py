@@ -47,6 +47,7 @@ class VisionCfg:
     accel: float = STRAIGHT["ACCEL"]
     margin: float = STRAIGHT["MARGIN_MM"]
     kp_pos: float = STRAIGHT["KP_POS"]
+    gap_finish_mm: float = VISION_CONTROL["GAP_FINISH_MM"]
 
 
     def size(self, info: dict | None) -> tuple[int, int]:
@@ -471,7 +472,7 @@ def prepare_heading(heading, imu=None):
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
                     log=print, log_path=None, stop_event=None):
-    """按跑道中心线前视点或灭点控制直走（只支持前进）。"""
+    """前段视觉巡线，最后 gap_finish_mm 用里程差保持航向（只支持前进）。"""
     rl = None
     stopped = False
     try:
@@ -480,9 +481,18 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             raise ValueError("视觉走直线只支持前进（goal_mm > 0），倒车请用 straight_pid")
 
         cfg = heading.cfg
+        if not math.isfinite(cfg.gap_finish_mm) or cfg.gap_finish_mm < 0:
+            raise ValueError("gap_finish_mm 必须为有限非负数")
         s_sign = straight_pid.FORWARD_SIGN
         limit = straight_pid.SPEED_LIMIT
-        loop, gap_src = prepare_heading(heading, imu)
+        gap_only = goal_mm is not None and goal_mm <= cfg.gap_finish_mm
+        if gap_only:
+            loop, gap_src = HeadingCascade(cfg), None
+        else:
+            loop, gap_src = prepare_heading(heading, imu)
+        finish_gap_src = gap_src or WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
+        # 短距离从起点保持航向；长距离在跨入末段时锁定新的 gap 基准。
+        gap_ref = 0.0 if gap_only else None
         wheels = WheelOdometry.read_origin(board, stop_event)
 
         spd_l = straight_pid.PID(straight_pid.KP_SPD, straight_pid.KI_SPD, 0.0,
@@ -502,6 +512,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         deadline = (t_start + max(10.0, 3.0 * goal_mm / max(cfg.speed, 1.0) + 5.0)
                     if goal_mm else float("inf"))
         rl = CsvLog(log_path, LOG_COLUMNS)
+        if gap_only:
+            log(f"  全程 {goal_mm:g}mm ≤ {cfg.gap_finish_mm:g}mm，使用 gap 保持起步航向")
 
         while True:
             check_cancel(stop_event)
@@ -526,44 +538,59 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             gap = d_l - d_r
             v_l, v_r = wheels.speed(tep)
             v_meas = (v_l + v_r) / 2.0
-            if gap_src is not None:                  # rate_src='gap' 才用电机的里程差
-                gap_src.update(now, gap)
+            finish_gap_src.update(now, gap)
+
+            if gap_ref is None and goal_mm is not None and goal_mm - dist <= cfg.gap_finish_mm:
+                gap_ref = gap
+                loop.reset()  # 视觉积分不能带入新的编码器航向基准。
+                log(f"  剩余 {goal_mm - dist:.0f}mm，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
 
             # ---- 航向反馈：视觉中心线 -> 角度误差 ----
-            hd = heading.step(now)
-            if hd is None:
-                reason = ("视觉没有可用灭点：需要两侧边界且延长线有稳定交点，已停车"
-                          if cfg.lookahead == "vanishing" else
-                          "视觉一直没有可用边界：确认边界模型开着、车在跑道上")
-                break
-            if not heading.view.absolute:
-                reason = ("只有一侧边界、也没有两侧都在时量到的半宽基准，算不出跑道"
-                          "中心线，已停车：把车摆到两侧都进画面的位置再出发")
-                break
-            lost_max = max(lost_max, hd.age)
-            if hd.age > cfg.lost_stop:
-                reason = (f"连续 {hd.age:.1f}s 没有新边界（模型关了/车偏出跑道/欠曝），"
-                          f"已停车")
-                break
+            if gap_ref is not None:
+                # gap 增大代表车向右偏转；正误差要求向左修正。
+                # 编码器方向已由 FORWARD_SIGN 处理，不使用视觉的 dir_sign。
+                e_now = math.degrees((gap - gap_ref) / cfg.track_mm)
+                hd = Heading(e_now, e_now, 0.0, None, "gap", True, 0.0, False)
+                rate, rate_valid = finish_gap_src.rate, finish_gap_src.valid
+            else:
+                hd = heading.step(now)
+                if hd is None:
+                    reason = ("视觉没有可用灭点：需要两侧边界且延长线有稳定交点，已停车"
+                              if cfg.lookahead == "vanishing" else
+                              "视觉一直没有可用边界：确认边界模型开着、车在跑道上")
+                    break
+                if not heading.view.absolute:
+                    reason = ("只有一侧边界、也没有两侧都在时量到的半宽基准，算不出跑道"
+                              "中心线，已停车：把车摆到两侧都进画面的位置再出发")
+                    break
+                lost_max = max(lost_max, hd.age)
+                if hd.age > cfg.lost_stop:
+                    reason = (f"连续 {hd.age:.1f}s 没有新边界（模型关了/车偏出跑道/欠曝），"
+                              f"已停车")
+                    break
+                if cfg.rate_src == "gyro" and imu.age() > IMU_STALE:
+                    reason = f"IMU 数据中断 {imu.age():.2f}s，已急停"
+                    break
+                e_now = cfg.dir_sign * hd.e
+                if cfg.e_dead > 0:
+                    if abs(e_now) <= cfg.e_dead:
+                        e_now = 0.0
+                    else:
+                        e_now -= math.copysign(cfg.e_dead, e_now)
+                rate, rate_valid = heading.src.rate, gap_src is None or gap_src.valid
             if abs(hd.e) > cfg.max_dev:
-                reason = (f"视觉角度误差 {hd.e:+.1f}° 超过 {cfg.max_dev:.0f}°，已急停："
-                          f"方向可能接反（用 config.py 的 dir_sign=-1 反过来）或车被拨偏了")
-                break
-            if cfg.rate_src == "gyro" and imu.age() > IMU_STALE:
-                reason = f"IMU 数据中断 {imu.age():.2f}s，已急停"
+                if gap_ref is not None:
+                    reason = f"gap 航向误差 {hd.e:+.1f}° 超过 {cfg.max_dev:.0f}°，已急停"
+                else:
+                    reason = (f"视觉角度误差 {hd.e:+.1f}° 超过 {cfg.max_dev:.0f}°，已急停："
+                              f"方向可能接反（用 config.py 的 dir_sign=-1 反过来）或车被拨偏了")
                 break
 
             # ---- ② 航向环：角度误差 -> 目标角速度 -> 差动修正 ----
             # e 按 dir_sign 折算到物理转向（e 正 = 需要往左修）。双环的内环工作在
             # 物理量上：ω_meas 正 = 正在往左转、trim 正 = 右轮快 = 往左转，所以
             # 内环反馈已经是物理转向，不再乘方向符号。
-            e_now = cfg.dir_sign * hd.e
-            if cfg.e_dead > 0:                      # 画幅中心附近别较劲（差动死区/摩擦）
-                if abs(e_now) <= cfg.e_dead:
-                    e_now = 0.0
-                else:
-                    e_now -= math.copysign(cfg.e_dead, e_now)
-            trim = loop.step(e_now, heading.src.rate, gap_src is None or gap_src.valid, dt)
+            trim = loop.step(e_now, rate, rate_valid, dt)
             rate_now = loop.w_meas                  # 真正进了控制的那一路角速度
 
             # ---- ① 位置环（可选）：剩余距离 -> 目标线速度 ----
@@ -620,7 +647,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                     f"  角速度 {w_txt}°/s（目标/实测）"
                     f"  修正 {trim:+6.1f}mm/s（前馈 {ff_txt} 反馈 {loop.trim_fb:+5.1f}）"
                     f"  {hd.src}"
-                    f"  {'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+5.0f}px")
+                    + (f"  相对 gap {gap - gap_ref:+.1f}mm" if gap_ref is not None else
+                       f"  {'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+5.0f}px"))
         board.spd(0, 0, 0, 0)
         stopped = True
 
@@ -650,7 +678,9 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 "w_ref_max": w_ref_max,
                 "w_err_max": w_err_max if w_err_n else None,
                 "trim_ff_avg": trim_ff_sum / trim_n if trim_n else 0.0,
-                "log_path": log_path, "rate_src": cfg.rate_src, "imu": imu is not None}
+                "log_path": log_path, "rate_src": cfg.rate_src, "imu": imu is not None,
+                "heading_mode": "gap" if gap_ref is not None else "vision",
+                "finish_gap_ref_mm": gap_ref}
         return dist, info
 
     finally:

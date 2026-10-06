@@ -109,9 +109,14 @@ class Base:
     def vision_straight(self, distance, vision):
         if not math.isfinite(distance) or distance <= 0:
             raise ValueError("视觉直走距离必须为有限正数")
-        heading = self._heading(vision)
-        if heading.wait_track(stop_event=self.stop_event) is None:
-            raise RuntimeError("出发前未拿到可用跑道中心线")
+        cfg = vision_straight.VisionCfg(speed=self.config["speed"], track_mm=straight_pid.TRACK_MM)
+        if distance * 1000 <= cfg.gap_finish_mm:
+            self._connect()
+            heading = vision_straight.VisionHeading(cfg, vision)
+        else:
+            heading = self._heading(vision)
+            if heading.wait_track(stop_event=self.stop_event) is None:
+                raise RuntimeError("出发前未拿到可用跑道中心线")
         measured, info = vision_straight.vision_straight(
             self.motor, heading, goal_mm=distance * 1000, stop_event=self.stop_event)
         return self._require_success({"ok": not info["reason"] and

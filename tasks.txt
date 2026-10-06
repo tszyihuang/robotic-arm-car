@@ -4,13 +4,21 @@ calibrate-position
 turn 44 0.24
 turn 44 0
 
-vision-straight 0.48
+vision-straight 0.47
 turn -87 0.36
 straight 0.27
 turn -87 0.36
 align
-vision-straight 0.45
+vision-straight 0.40
+
+
 arm-move -90 37 110 62      #移动待机位置（观察顺序）
+
+
+
+
+
+
 
 vision-straight 1.76
 straight 0.13

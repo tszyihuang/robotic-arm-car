@@ -50,6 +50,7 @@ VISION_CONTROL = {
     "KP_YAW": 10.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
     "KP_RATE": 10.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
+    "GAP_FINISH_MM": 300.0,  # 视觉直走最后这段距离用 gap 保持切换时航向。
 }
 
 ALIGN = {
