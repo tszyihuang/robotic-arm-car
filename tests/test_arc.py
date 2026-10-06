@@ -1,5 +1,5 @@
 import unittest
-from car_nodes.base import arc_turn as arc
+from base import arc_turn as arc
 
 class PlannerTests(unittest.TestCase):
     def test_low_speed_arc_keeps_requested_cruise_and_inner_wheel_below_old_floor(self):

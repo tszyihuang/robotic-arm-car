@@ -1,0 +1,38 @@
+{
+  "main": [
+    ["arm-calibrate", []],
+    ["straight", [0.3]],
+    ["arm-move", [6.0, 0.0, 160.0, 1.0]],
+    ["scan-qrcode", []],
+    ["arm-home", []],
+    ["turn", [87.0, 0.38]],
+    ["turn", [-45.0, 0.52]],
+    ["turn", [-42.0, 0.0]],
+    ["straight", [0.7]],
+    ["calibrate-position", []],
+    ["turn", [44.0, 0.24]],
+    ["turn", [44.0, 0.0]],
+    ["straight", [0.46]],
+    ["turn", [-87.0, 0.36]],
+    ["straight", [0.27]],
+    ["turn", [-87.0, 0.36]],
+    ["align", []],
+    ["vision-straight", [0.45]],
+    ["arm-move", [-90.0, 37.0, 110.0, 62.0]],
+    ["抓球任务", []],
+    ["vision-straight", [1.76]],
+    ["straight", [0.13]],
+    ["turn", [-87.0, 0.43]],
+    ["vision-straight", [0.67]],
+    ["vision-straight", [1.55]]
+  ],
+  "middle_ball": [
+    ["gripper-open", []],
+    ["arm-move", [-95.0, 133.0, 134.0, -83.0]],
+    ["gripper-close", []],
+    ["arm-move", [-90.0, 37.0, 110.0, 62.0]],
+    ["arm-move", [90.0, 82.0, 142.0, -56.0]],
+    ["gripper-open", []],
+    ["arm-home", []]
+  ]
+}

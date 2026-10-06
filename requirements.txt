@@ -1,0 +1,8 @@
+# 不安装本项目，只安装运行依赖。
+pyserial>=3.5
+numpy>=1.26,<3
+PyYAML>=6,<7
+ultralytics>=8.4.164,<9
+
+# OpenCV、PyTorch、torchvision 沿用本机已可用的 JetPack/CUDA 对应版本。
+# 不要为了本次重构重新安装或替换这些库。

@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch, call
-from car_nodes.base import vision_align as va, vision_straight as vs
+from base import vision_align as va, vision_straight as vs
 
 def heading():
     def edge(x):

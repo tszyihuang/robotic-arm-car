@@ -1,9 +1,0 @@
-# One line in the existing task language. Distances: m; angles: degrees; speed: mm/s.
-string command
----
-bool success
-string message
-string details_json
----
-string phase
-float64 elapsed_s

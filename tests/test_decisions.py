@@ -6,12 +6,10 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from car_nodes.arm.session import ArmSession
-from car_nodes.common.control import MotionCancelled
-from car_nodes.planner.decision import mission_code, selected_branch
-from car_nodes.planner.tasks import prepare_program
-from car_nodes.vision.targets import candidates_from_detections, choose_position, colored_targets, observe
-from car_nodes.vision.commands import internal_command
+from arm.api import Arm as ArmSession
+from control import MotionCancelled
+from vision.qrcode import mission_code
+from vision.targets import candidates_from_detections, choose_position, colored_targets, observe
 
 
 def balls(names=('红球', '绿球', '蓝球')):
@@ -33,32 +31,6 @@ class DecisionTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 mission_code(invalid)
 
-    def test_sections_are_only_inserted_when_chosen(self):
-        program = prepare_program('[主线]\narm-calibrate\nscan-qrcode\n抓球任务\nstraight 0.5\n'
-                                  '[抓中间的小球]\ngripper-close\narm-home\n[抓左边的小球]\n')
-        self.assertEqual([s.command for s in program.main], ['arm-calibrate', 'scan-qrcode', '抓球任务', 'straight'])
-        self.assertEqual(len(program.branches['抓中间的小球']), 2)
-        self.assertEqual(selected_branch('ball', 1), '抓中间的小球')
-        self.assertEqual(selected_branch('target', 0), '打左边的靶')
-        self.assertEqual(selected_branch('object', 2), '抓右边的物体')
-        with self.assertRaises(ValueError):
-            selected_branch('ball', True)
-
-    def test_reachable_branches_validate_before_movement(self):
-        for table in ('[主线]\n抓球任务',
-                      '[主线]\nscan-qrcode\n抓球任务\n[抓左边的小球]\narm-home',
-                      '[主线]\nscan-qrcode\n抓球任务\n[抓左边的小球]\nturn nan',
-                      '[主线]\nscan-qrcode\n抓球任务\n[抓左边的小球]\n打靶任务'):
-            with self.subTest(table=table), self.assertRaises(ValueError):
-                prepare_program(table)
-
-    def test_debug_requests_validate_exact_switches(self):
-        self.assertEqual(internal_command('set-models boundary=true objects=false'),
-                         ('set-models', {'boundary': True, 'objects': False}))
-        for command in ('set-models boundary=yes objects=false', 'set-models boundary=true',
-                        'observe-target kind=ball value=cone', 'start-camera extra=1'):
-            with self.assertRaises(ValueError):
-                internal_command(command)
 
 
 class TargetTests(unittest.TestCase):
