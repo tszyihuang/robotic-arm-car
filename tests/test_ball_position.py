@@ -1,7 +1,8 @@
-"""小球位置 PID：连续运动、图像采集间隔、反馈断流与异常停车。"""
+"""小球编码器位置 PID：视觉目标、延迟补偿、连续运动与异常停车。"""
 import contextlib
 import io
 from pathlib import Path
+import re
 import threading
 import time
 import unittest
@@ -30,15 +31,17 @@ def layout(x, width=640, color="green", index=0, stamp=100.0):
 class SimulatedRobot:
     """10 Hz 延迟视觉、100 Hz 编码器及有惯性的电机，驱动真实控制函数。"""
 
-    def __init__(self, error=120, width=640):
+    def __init__(self, error=120, width=640, deadzone=0, coast_tau=0.06):
         self.clock = 100.0
         self.error0, self.width = error, width
+        self.deadzone, self.coast_tau = deadzone, coast_tau
         self.command = [0.0, 0.0]
         self.velocity = [0.0, 0.0]
         self.position = [0.0, 0.0]
         self.last_counts = [0, 0]
         self.commands = []
         self.stops = []
+        self.brakes = []
         self.next_capture = 100.1
         self.index = 0
         self.pending = []
@@ -59,6 +62,12 @@ class SimulatedRobot:
         self.stops.append(self.clock)
         self.spd(0, 0, 0, 0)
 
+    def brake(self, speeds):
+        self.brakes.append((self.clock, speeds))
+        # 反向力矩比零速停车更快；下一次控制拍继续根据实测速制动。
+        self.velocity = [value * 0.5 for value in self.velocity]
+        self.spd(0, 0, 0, 0)
+
     def feedback(self, timeout=0):
         counts = [round(value / (BASE["meters_per_count"] * 1000)) for value in self.position]
         increments = [value - previous for value, previous in zip(counts, self.last_counts)]
@@ -73,7 +82,9 @@ class SimulatedRobot:
         if stop_event is not None and stop_event.is_set():
             raise MotionCancelled("取消")
         for i in range(2):
-            self.velocity[i] += seconds / (0.06 + seconds) * (self.command[i] - self.velocity[i])
+            effective = self.command[i] if abs(self.command[i]) >= self.deadzone else 0.0
+            tau = 0.06 if effective else self.coast_tau
+            self.velocity[i] += seconds / (tau + seconds) * (effective - self.velocity[i])
             self.position[i] += self.velocity[i] * seconds
         self.clock += seconds
         if not self.freeze and self.clock + 1e-8 >= self.next_capture:
@@ -107,7 +118,7 @@ class SimulatedRobot:
 
 
 class PositionPIDTests(unittest.TestCase):
-    def test_integrates_over_capture_interval_and_filters_derivative(self):
+    def test_integrates_over_control_interval_and_filters_derivative(self):
         pid = PositionPID(validate_config({"kp": 0.6, "ki": 0.02, "kd": 0.08, "speed": 30}))
         self.assertAlmostEqual(pid.step(20, 100), 12)
         self.assertAlmostEqual(pid.step(30, 100.1), 18 + 3.2 + 0.06)
@@ -128,8 +139,88 @@ class PositionPIDTests(unittest.TestCase):
         self.assertEqual(pid.integral, 0)
         self.assertIsNone(pid.stamp)
 
+    def test_invalid_distance_scale_and_position_tolerance_are_rejected(self):
+        for field in ("mm_per_px", "position_tolerance_mm"):
+            for value in (0, -1, float("nan"), float("inf")):
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
+                    validate_config({field: value})
+
 
 class ContinuousBallPositionTests(unittest.TestCase):
+    def test_encoder_progress_reduces_position_error_between_visual_frames(self):
+        robot = SimulatedRobot()
+        robot.freeze = True
+        errors = []
+        original = PositionPID.step
+
+        def step(pid, error, stamp):
+            errors.append(error)
+            return original(pid, error, stamp)
+
+        with patch.object(PositionPID, "step", autospec=True, side_effect=step):
+            with self.assertRaisesRegex(TimeoutError, "校准超时"):
+                robot.run(mm_per_px=0.25, kp=0.6, timeout=0.3)
+        self.assertEqual(robot.index, 0)
+        self.assertGreater(len(errors), 20, "位置环在视觉帧间隙仍持续更新")
+        self.assertAlmostEqual(errors[0], 30.0)
+        self.assertLess(errors[-1], errors[0] - 1.0)
+
+    def test_overshooting_encoder_target_brakes_before_reversing_on_a_fresh_frame(self):
+        robot = SimulatedRobot()
+        advance = robot.advance
+        disturbed = False
+
+        def disturb(seconds, stop_event=None):
+            nonlocal disturbed
+            advance(seconds, stop_event)
+            if not disturbed and robot.clock - 100 >= 0.05:
+                robot.position = [35.0, 35.0]  # 目标是 30 mm，模拟越过目标。
+                disturbed = True
+
+        robot.advance = disturb
+        robot.run(mm_per_px=0.25, kp=0.6)
+        self.assertTrue(robot.brakes)
+        self.assertTrue(any(values[0] < 0 and values[2] < 0 for _, values in robot.commands))
+        reverse_at = next(stamp for stamp, values in robot.commands if values[0] < 0 and values[2] < 0)
+        self.assertGreaterEqual(reverse_at - robot.brakes[0][0], BALL_POSITION["settle"])
+
+    def test_deadzone_and_slow_zero_speed_stop_converge_from_both_sides(self):
+        for error in (-240, -30, 30, 240):
+            with self.subTest(error=error):
+                robot = SimulatedRobot(error, deadzone=25, coast_tau=0.4)
+                result = robot.run(mm_per_px=0.25)
+                self.assertLess(result["elapsed"], 8)
+                self.assertLessEqual(abs(result["position_error_mm"]), 2)
+                self.assertLess(max(abs(v) for v in robot.velocity), BALL_POSITION["speed_tolerance"])
+                self.assertTrue(robot.brakes)
+
+    def test_a_frame_frozen_before_stopping_cannot_confirm_completion(self):
+        robot = SimulatedRobot(error=0)
+        advance = robot.advance
+
+        def freeze_early(seconds, stop_event=None):
+            advance(seconds, stop_event)
+            if robot.index >= 3:
+                robot.freeze = True
+
+        robot.advance = freeze_early
+        with self.assertRaisesRegex(TimeoutError, "视觉断流"):
+            robot.run(settle=0.5)
+
+    def test_calibrated_visual_target_uses_capture_position_despite_inference_delay(self):
+        for error in (-120, 120):
+            with self.subTest(error=error):
+                robot = SimulatedRobot(error)
+                messages = []
+                result = robot.run(mm_per_px=0.25, kp=0.6, log=messages.append)
+                targets = [float(match.group(1)) for message in messages
+                           if (match := re.search(r"目标位置 ([+-]?[\d.]+)mm", message))]
+                self.assertGreater(len(targets), 10)
+                # 正确比例下目标始终是初始误差 / 4，不随 50 ms 推理延迟向前漂移。
+                self.assertTrue(all(abs(target - error / 4) <= 0.1 for target in targets))
+                self.assertLessEqual(abs(result["position_error_mm"]), BALL_POSITION["position_tolerance_mm"])
+                self.assertLessEqual(abs(result["error_px"]), BALL_POSITION["tolerance_px"])
+
     def test_new_detection_is_logged_without_waiting_half_a_second(self):
         robot = SimulatedRobot(error=70)
         messages = []
@@ -145,17 +236,19 @@ class ContinuousBallPositionTests(unittest.TestCase):
                 result = robot.run()
                 self.assertTrue(result["ok"])
                 self.assertLessEqual(abs(result["error_px"]), BALL_POSITION["tolerance_px"])
+                self.assertLessEqual(abs(result["position_error_mm"]), BALL_POSITION["position_tolerance_mm"])
                 self.assertEqual(robot.observe_count, 1)
                 self.assertGreater(robot.sample_count, robot.index)
                 self.assertEqual(len(robot.stops), 2, "启动与退出停车，移动期间连续发轮速")
                 moving = [values for _, values in robot.commands if any(values)]
                 self.assertTrue(moving)
                 self.assertTrue(all(value * error >= 0 for value in moving[0]))
-                self.assertLessEqual(max(abs(value) for values in moving for value in values), 30)
+                self.assertLessEqual(max(abs(value) for values in moving for value in values), BALL_POSITION["speed"])
                 self.assertTrue(any(0 < abs(values[0]) < 10 for values in moving))
                 for (previous_t, previous), (stamp, values) in zip(robot.commands[1:-1], robot.commands[2:-1]):
                     allowed = BALL_POSITION["accel"] * (stamp - previous_t) + 1e-6
-                    self.assertLessEqual(max(abs(v - old) for v, old in zip(values, previous)), allowed)
+                    if any(values):  # 到位制动直接归零，运动过程仍按加速度限幅。
+                        self.assertLessEqual(max(abs(v - old) for v, old in zip(values, previous)), allowed)
                 self.assertEqual(robot.commands[-1][1], (0, 0, 0, 0))
 
     def test_uses_actual_image_width_and_already_centered_never_moves(self):
@@ -299,7 +392,10 @@ class BallPositionTaskTests(unittest.TestCase):
             result = execute(Step(1, "calibrate-ball-position", ()), DryBase(), None, DryVision())
         self.assertIsNone(result)
         self.assertIn("偏左 → 后退，偏右 → 前进", output.getvalue())
-        self.assertIn("Kp=0.6，Ki=0.02，Kd=0.08", output.getvalue())
+        self.assertIn("编码器目标位置 → 位置 PID → 轮速 PI", output.getvalue())
+        self.assertIn(f"视觉换算 {BALL_POSITION['mm_per_px']:g} mm/px", output.getvalue())
+        self.assertIn(f"Kp={BALL_POSITION['kp']:g}(1/s)", output.getvalue())
+        self.assertIn(f"Ki={BALL_POSITION['ki']:g}(1/s²)，Kd={BALL_POSITION['kd']:g}", output.getvalue())
         self.assertNotIn("校准完成", output.getvalue())
 
     def test_task_and_base_pass_shared_devices_and_cancellation_to_controller(self):

@@ -43,10 +43,17 @@ POSITION = {
 }
 
 BALL_POSITION = {
-    # 横向误差 px → 前后速度 mm/s；中间球偏左后退、偏右前进。
-    # 保守整定起点：偏差 70 px 时目标速度 10.5 mm/s，接近中心逐渐减速。
-    "speed": 30.0, "tolerance_px": 8.0, "stable_frames": 3,
-    "kp": 0.15, "ki": 0.0, "kd": 0.0, "derivative_tau": 0.15,
+    # 横向误差 px → 位移 mm → 编码器目标位置 → 位置 PID → 轮速 PI。
+    # 中间球偏左后退、偏右前进；现场估计 110 px ≈ 40 mm，后续可实测修正。
+    # mm_per_px = 前后移动距离(mm) / 球心横坐标变化绝对值(px)。
+    "mm_per_px": 40.0 / 110.0, "position_tolerance_mm": 2.0,
+    # kp 单位 1/s；110 px 时位置修正约 40 mm，P 输出 24 mm/s，再应用起步下限。
+    "speed": 100.0, "tolerance_px": 8.0, "stable_frames": 3,
+    "kp": 0.6, "ki": 0.0, "kd": 0.0, "derivative_tau": 0.15,
+    # 驱动板已有速度 PID，主机轮速环默认只用 P，避免两层积分共同积累。
+    "speed_kp": 0.6, "speed_ki": 0.0,
+    # 实测 20 mm/s 几乎不动；接近目标时采用可启动速度并提前制动。
+    "min_speed": 35.0, "brake_tau": 0.04, "speed_window": 0.08,
     "accel": 100.0, "loop_hz": 100.0,
     "settle": 0.2, "speed_tolerance": 5.0, "lost_timeout": 0.6,
     "max_distance_m": 0.3, "timeout": 30.0,
