@@ -1,15 +1,13 @@
 [主线]
 arm-calibrate
 arm-move -90 55 74 89      #移动待机位置（观察顺序）
+
 detect-balls               #读取 YOLO 小球结果，打印左、中、右及颜色
 calibrate-ball-position
 
-# 校准位置
 
 home
 arm-disable
-
-
 
 [抓中间的小球]
 gripper-open
