@@ -269,8 +269,12 @@ def main(args=None):
 
     camera = bus = web = None
     stop_event = threading.Event()
+    disable_on_exit = False
 
     def interrupt(signum, frame):
+        # 清理期间再次按 Ctrl+C，不中断正在发送的失能命令。
+        if stop_event.is_set():
+            return
         stop_event.set()
         raise KeyboardInterrupt
 
@@ -284,7 +288,7 @@ def main(args=None):
         web.start(camera)
         print(f"锁靶选择：{opts.target}；PID Kp={cfg['kp']:g} Ki={cfg['ki']:g} Kd={cfg['kd']:g}。"
               f"ID2 保持 {cfg['motor2_angle_deg']:g}°。"
-              "按 Ctrl+C 结束并保持当前角度。", flush=True)
+              "按 Ctrl+C 结束并失能机械臂 ID1–4。", flush=True)
         web_address = "127.0.0.1" if opts.web_host == "0.0.0.0" else opts.web_host
         print(f"瞄准点矫正网页：http://{web_address}:{web.port}", flush=True)
         if opts.web_host == "0.0.0.0":
@@ -294,17 +298,19 @@ def main(args=None):
             stop_event=stop_event, aim=aim, on_update=web.update,
             log=lambda message: print(message, flush=True))
     except (KeyboardInterrupt, MotionCancelled):
-        print("锁靶已结束。", flush=True)
+        disable_on_exit = True
+        print("锁靶已结束，正在失能机械臂 ID1–4。", flush=True)
     except Exception as exc:
         print(f"锁靶失败：{exc}", file=sys.stderr, flush=True)
         return 1
     finally:
         stop_event.set()
         actions = []
+        if bus is not None:
+            # 优先失能并关闭总线，然后停止网页和摄像头。
+            actions.append(("机械臂串口关闭", lambda: bus.close(disable_motors=disable_on_exit)))
         if web is not None:
             actions.append(("瞄准点矫正网页关闭", web.close))
-        if bus is not None:
-            actions.append(("机械臂串口关闭", lambda: bus.close(disable_motors=False)))
         if camera is not None:
             actions.append(("摄像头关闭", camera.close))
         cleanup(*actions, raise_errors=False)

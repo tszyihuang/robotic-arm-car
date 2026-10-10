@@ -133,7 +133,7 @@ bash tests/run.sh -q
 
 横向误差驱动 ID1：目标在瞄准点左侧减角，右侧增角；纵向误差驱动 ID4：目标在瞄准点上方减角，下方增角。未校正时瞄准点为画面中心。两轴各用独立 PID，误差按画面半宽/半高归一化，输出角速度（°/s），再乘新帧时间间隔生成角度增量；每次目标角基于当前编码器反馈，并按编码器精度（约 0.022°）量化，避免小修正被协议截成零。默认容差 ±8 px、最大角速度 150°/s（25 rpm）、单次增量最多 10°，进入容差后保持该轴当前角度。速度上限只限制 PID 输出，提高上限不会自动放大 PID 算出的速度。PID 带微分滤波、积分抗饱和，缺靶或画面过期时清除 PID 历史。启动跟踪时，机械臂电机 ID2 移至 12° 并由位置环持续保持，速度读取 `ARM['speed_rpm']`；固定角度由 `TARGET_LOCK['motor2_angle_deg']` 配置。ID1、ID4 负责标靶跟踪，ID3 保持原状。角度直接使用多圈编码器角，无需软件归零。
 
-参数在 `config.py` 的 `TARGET_LOCK` 中调整，也可使用 `--kp 30 --ki 0 --kd 0.3 --hz 20 --tolerance-px 8 --max-rate-deg-s 150 --max-step-deg 10` 临时覆盖。摄像头和机械臂串口支持 `--camera 0 --port /dev/ttyUSB0`；`--duration 10` 运行 10 秒后退出。缺靶或按 `Ctrl+C` 结束时，ID1、ID4 保持当前位置，ID2 保留 12° 的位置目标；退出后关闭连接。支持 `python3 -m tasks.lock_target` 和从任意目录运行脚本绝对路径。
+参数在 `config.py` 的 `TARGET_LOCK` 中调整，也可使用 `--kp 30 --ki 0 --kd 0.3 --hz 20 --tolerance-px 8 --max-rate-deg-s 150 --max-step-deg 10` 临时覆盖。摄像头和机械臂串口支持 `--camera 0 --port /dev/ttyUSB0`；`--duration 10` 运行 10 秒后退出。缺靶时 ID1、ID4 保持当前位置，ID2 保留 12° 的位置目标。按 `Ctrl+C`（或收到 `SIGTERM`）结束时自动失能机械臂 ID1–4，包括 ID2，然后关闭串口、网页和摄像头；清理期间再次按 `Ctrl+C` 不会中断失能流程。到达 `--duration` 的正常结束仍保留位置保持。支持 `python3 -m tasks.lock_target` 和从任意目录运行脚本绝对路径。
 
 锁靶程序同时开启瞄准点矫正网页，默认监听 `0.0.0.0:8080`。本机访问 `http://127.0.0.1:8080`，同一局域网访问终端打印的地址；端口可用 `python3 tasks/lock_target.py --web-port 8081` 修改，监听地址用 `--web-host` 指定。`--port` 仍表示机械臂串口。网页和跟踪共用摄像头，预览在独立线程中最多以 15 Hz 编码，无需另外启动 `debug/camera_web.py`。
 

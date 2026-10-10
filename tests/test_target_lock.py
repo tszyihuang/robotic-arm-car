@@ -1,5 +1,6 @@
 """彩色靶锁定、PID 方向和模拟两轴闭环；不连接硬件。"""
 from contextlib import ExitStack
+import signal
 import struct
 import threading
 import unittest
@@ -353,12 +354,67 @@ class TargetLockRunTests(unittest.TestCase):
                 patch("builtins.print"):
             self.assertEqual(main([]), 0)
         self.assertEqual(task.call_args.args[2], "middle")
-        bus.close.assert_called_once_with(disable_motors=False)
+        bus.close.assert_called_once_with(disable_motors=True)
         camera.close.assert_called_once()
         web.start.assert_called_once_with(camera)
         web.close.assert_called_once()
         self.assertIs(task.call_args.kwargs["on_update"], web.update)
         self.assertTrue(task.call_args.kwargs["stop_event"].is_set())
+
+    def test_cli_ctrl_c_disables_all_four_motors_after_holding(self):
+        # 模拟启动前 ID3 已经使能，退出应释放四轴，包括保持 12° 的 ID2。
+        self.bus.motors[3].enabled = True
+        camera = self.scripted_camera([(image(), 1, 0)])
+        web = Mock()
+        with patch("tasks.lock_target.CameraStream", return_value=camera), \
+                patch("tasks.lock_target.MotorBus", return_value=self.bus), \
+                patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                patch("tasks.lock_target.local_addresses", return_value=[]), \
+                patch("builtins.print"):
+            self.assertEqual(main([]), 0)
+        self.assertTrue(self.bus.closed)
+        self.assertTrue(all(not motor.enabled for motor in self.bus.motors.values()))
+        self.assertEqual(self.bus.motors[2].angle, 12.0)
+        camera.close.assert_called_once()
+        web.close.assert_called_once()
+
+    def test_cli_normal_completion_preserves_motor_holding(self):
+        camera, bus, web = Mock(), Mock(), Mock()
+        with patch("tasks.lock_target.CameraStream", return_value=camera), \
+                patch("tasks.lock_target.MotorBus", return_value=bus), \
+                patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                patch("tasks.lock_target.local_addresses", return_value=[]), \
+                patch("tasks.lock_target.run"), patch("builtins.print"):
+            self.assertEqual(main(["--duration", "1"]), 0)
+        bus.close.assert_called_once_with(disable_motors=False)
+
+    def test_second_ctrl_c_during_disable_does_not_interrupt_cleanup(self):
+        camera, bus, web = Mock(), Mock(), Mock()
+        handlers, order = {}, []
+
+        def install_signal(sig, handler):
+            handlers[sig] = handler
+            return signal.SIG_DFL
+
+        def interrupted_run(*args, **kwargs):
+            handlers[signal.SIGINT](signal.SIGINT, None)
+
+        def close_bus(**kwargs):
+            self.assertTrue(kwargs["disable_motors"])
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            order.append("bus")
+
+        bus.close.side_effect = close_bus
+        web.close.side_effect = lambda: order.append("web")
+        camera.close.side_effect = lambda: order.append("camera")
+        with patch("tasks.lock_target.signal.signal", side_effect=install_signal), \
+                patch("tasks.lock_target.CameraStream", return_value=camera), \
+                patch("tasks.lock_target.MotorBus", return_value=bus), \
+                patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                patch("tasks.lock_target.local_addresses", return_value=[]), \
+                patch("tasks.lock_target.run", side_effect=interrupted_run), patch("builtins.print"):
+            self.assertEqual(main([]), 0)
+        self.assertEqual(order, ["bus", "web", "camera"])
 
     def test_web_bind_failure_does_not_open_hardware(self):
         with patch("tasks.lock_target.TargetLockWeb", side_effect=OSError("端口已占用")), \
