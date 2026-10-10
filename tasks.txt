@@ -46,10 +46,34 @@ arm-home
 [打左边的靶]
 [打中间的靶]
 [打右边的靶]
-[抓左边的物体]
-[抓中间的物体]
-[抓右边的物体]
 
+
+[抓左边的物体]
+arm-calibrate
+gripper-open
+arm-move -127 0 102 91
+arm-move -127 114 128 -84
+gripper-close
+arm-move -127 34 116 16
+arm-home
+
+[抓中间的物体]
+arm-calibrate
+gripper-open
+arm-move -94 0 102 91
+arm-move -94 107 149 -97
+gripper-close
+arm-move -94 34 116 16
+arm-home
+
+[抓右边的物体]
+arm-calibrate
+gripper-open
+arm-move -63 0 102 91
+arm-move -63 109 134 -83
+gripper-close
+arm-move -63 34 116 16
+arm-home
 
 
 
