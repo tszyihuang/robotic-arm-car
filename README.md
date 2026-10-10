@@ -52,6 +52,17 @@ python3 main.py
 
 电机和 IMU 端口留空会自动识别；机械臂默认使用固定设备路径；夹爪留空会读取舵机并复用 `arm/servo_binding.json` 绑定。实机建议填写固定端口。两套 YOLO 推理默认使用 `cuda:0` 和 FP16，需要可用的 CUDA 环境。
 
+机械臂 RS485 波特率为 921600，`ARM['serial_latency_ms']=1`。Linux FTDI 驱动的接收延时默认是 16 ms，普通用户通常无权修改；本机已安装 `udev/99-car-arm-latency.rules`，将机械臂适配器 `FTBVQPDL` 的接口 `00` 永久设为 1 ms，重启或 USB 重连后自动生效。换机部署时，从项目根目录安装：
+
+```bash
+sudo install -o root -g root -m 0644 udev/99-car-arm-latency.rules /etc/udev/rules.d/99-car-arm-latency.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=change --subsystem-match=usb-serial
+sudo udevadm settle
+```
+
+规则按设备序列号和接口匹配，不依赖 `ttyUSB` 编号；更换适配器后需同步修改规则和 `ARM['port']`。可运行 `cat /sys/bus/usb-serial/devices/$(basename "$(readlink -f /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBVQPDL-if00-port0)")/latency_timer` 确认输出为 `1`。这项设置降低 USB 接收缓冲等待，电机端与主机波特率仍需保持一致。
+
 `calibrate-object-position` 无参数，用于后续物品区。复用后台 YOLO 的圆柱、圆锥、腰鼓检测，忽略小球；三个物品完整可见时按检测框中心横坐标排序，取中间那个对齐到同一帧原图宽度的一半。中间物品偏左后退、偏右前进，复用小球的编码器位置 PID、延迟补偿、制动和停稳确认；缺物品立即停车，中间物品形状变化、视觉或编码器断流、超时及取消均停止任务。返回结果中的 `shape` 是中间物品的形状。
 
 在 `tasks.txt` 对应任务段中，先安排物品区的机械臂观察姿态，再写 `calibrate-object-position`，校准成功后继续回位或抓取。无需先执行 `detect-balls`。任务表末尾保留了注释示例，观察姿态和执行位置由后续路线填写。`config.py` 的 `OBJECT_POSITION` 独立配置速度、容差、PID 和超时，初值沿用小球参数；`mm_per_px` 需按实际物品观察姿态、拍摄距离和分辨率重新标定。干跑打印参数，不连接设备。
@@ -120,9 +131,15 @@ bash tests/run.sh -q
 
 `python3 tasks/lock_target.py` 独立打开摄像头和机械臂 RS485，复用现有 HSV 红、绿、蓝色块标靶识别。无参数时选择最靠近画面中心的目标；可传 `left`、`middle`、`right` 选择初始位置，或 `red`、`green`、`blue` 指定颜色，例如 `python3 tasks/lock_target.py red`。首次锁定后按颜色和邻近位置跟踪同一目标，不随左右顺序变化重新选靶；目标丢失时保持当前位置，保留目标身份，重新出现且位置匹配后继续跟踪。无需三个靶同时可见。
 
-横向误差驱动 ID1：目标偏左减角，偏右增角；纵向误差驱动 ID4：目标偏上减角，偏下增角。两轴各用独立 PID，误差按画面半宽/半高归一化，输出角速度（°/s），再乘新帧时间间隔生成角度增量；每次目标角基于当前编码器反馈，并按编码器精度（约 0.022°）量化，避免小修正被协议截成零。默认容差 ±8 px、最大角速度 150°/s（25 rpm）、单次增量最多 10°，进入容差后保持该轴当前角度。速度上限只限制 PID 输出，提高上限不会自动放大 PID 算出的速度。PID 带微分滤波、积分抗饱和，缺靶或画面过期时清除 PID 历史。启动跟踪时，机械臂电机 ID2 移至 12° 并由位置环持续保持，速度读取 `ARM['speed_rpm']`；固定角度由 `TARGET_LOCK['motor2_angle_deg']` 配置。ID1、ID4 负责标靶跟踪，ID3 保持原状。角度直接使用多圈编码器角，无需软件归零。
+横向误差驱动 ID1：目标在瞄准点左侧减角，右侧增角；纵向误差驱动 ID4：目标在瞄准点上方减角，下方增角。未校正时瞄准点为画面中心。两轴各用独立 PID，误差按画面半宽/半高归一化，输出角速度（°/s），再乘新帧时间间隔生成角度增量；每次目标角基于当前编码器反馈，并按编码器精度（约 0.022°）量化，避免小修正被协议截成零。默认容差 ±8 px、最大角速度 150°/s（25 rpm）、单次增量最多 10°，进入容差后保持该轴当前角度。速度上限只限制 PID 输出，提高上限不会自动放大 PID 算出的速度。PID 带微分滤波、积分抗饱和，缺靶或画面过期时清除 PID 历史。启动跟踪时，机械臂电机 ID2 移至 12° 并由位置环持续保持，速度读取 `ARM['speed_rpm']`；固定角度由 `TARGET_LOCK['motor2_angle_deg']` 配置。ID1、ID4 负责标靶跟踪，ID3 保持原状。角度直接使用多圈编码器角，无需软件归零。
 
 参数在 `config.py` 的 `TARGET_LOCK` 中调整，也可使用 `--kp 30 --ki 0 --kd 0.3 --hz 20 --tolerance-px 8 --max-rate-deg-s 150 --max-step-deg 10` 临时覆盖。摄像头和机械臂串口支持 `--camera 0 --port /dev/ttyUSB0`；`--duration 10` 运行 10 秒后退出。缺靶或按 `Ctrl+C` 结束时，ID1、ID4 保持当前位置，ID2 保留 12° 的位置目标；退出后关闭连接。支持 `python3 -m tasks.lock_target` 和从任意目录运行脚本绝对路径。
+
+锁靶程序同时开启瞄准点矫正网页，默认监听 `0.0.0.0:8080`。本机访问 `http://127.0.0.1:8080`，同一局域网访问终端打印的地址；端口可用 `python3 tasks/lock_target.py --web-port 8081` 修改，监听地址用 `--web-host` 指定。`--port` 仍表示机械臂串口。网页和跟踪共用摄像头，预览在独立线程中最多以 15 Hz 编码，无需另外启动 `debug/camera_web.py`。
+
+网页点击画面设置黄色瞄准点，也可输入相对画面中心的横向、纵向像素偏移，或使用方向按钮按所选像素步长微调；向右、向下为正。PID 从下一个新帧开始根据“标靶中心 − 瞄准点”控制两轴，修改瞄准点时重置旧积分和微分；初次选靶仍按原来的位置或颜色规则进行，校正不会重新选靶。网页绿色框显示当前锁定标靶，“恢复画面中心”将瞄准点恢复到画面正中。
+
+点击“保存校正”将瞄准点写入 `tasks/target_lock_aim.json`，下次启动自动读取；只调整而不保存则仅对本次运行生效。恢复中心后同样需要保存才能覆盖旧校正。文件使用归一化坐标，分辨率变化时保持相同的画面相对位置，不加入 Git；可用 `--aim-file 路径` 指定另一份校正文件。退出程序时同时关闭网页、摄像头和串口。
 
 摄像头和角度调试也可在项目根目录直接运行脚本，或使用绝对路径从任意目录启动：
 

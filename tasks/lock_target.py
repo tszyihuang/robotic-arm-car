@@ -2,7 +2,9 @@
 import argparse
 import math
 from pathlib import Path
+import signal
 import sys
+import threading
 import time
 
 if __name__ == "__main__" and not __package__:
@@ -12,6 +14,8 @@ from arm.config import ArmConfig, finite
 from arm.motor import ANGLE_SCALE, MotorBus, check_fault, position_payload
 from base.control import MotionCancelled, check_cancel, clamp, cleanup, wait_cancelable
 from config import ARM, TARGET_LOCK, VISION
+from debug.camera_web import local_addresses
+from tasks.target_lock_web import AimPoint, DEFAULT_AIM_FILE, TargetLockWeb, validate_aim
 from vision.camera import CameraStream
 from vision.targets import colored_targets
 
@@ -82,16 +86,22 @@ class TargetLock:
         self.config = validate_config(config)
         self.pids = {addr: PID(self.config) for addr in AXES}
         self.color = self.center = None
+        self.aim = (0.5, 0.5)
 
     def lost(self):
         # 保留所选目标身份；丢失后不重新挑选画面中央的其他颜色。
         for pid in self.pids.values():
             pid.reset()
 
-    def step(self, candidates, size, dt):
+    def step(self, candidates, size, dt, aim=(0.5, 0.5)):
         width, height = size
         if width <= 0 or height <= 0 or not math.isfinite(dt) or dt <= 0:
             raise ValueError("画面尺寸和 PID 时间间隔必须为正数")
+        aim = validate_aim(*aim)
+        if aim != self.aim:
+            # 网页修改设定点时清除旧积分和微分，避免人为跳变产生瞬时尖峰。
+            self.lost()
+            self.aim = aim
 
         def center(row):
             x1, y1, x2, y2 = row["box"]
@@ -118,8 +128,8 @@ class TargetLock:
         else:
             chosen = min(choices, key=distance)
         self.color, self.center = chosen["value"], center(chosen)
-        errors = {1: (self.center[0] - 0.5) * width,
-                  4: (self.center[1] - 0.5) * height}
+        errors = {1: (self.center[0] - aim[0]) * width,
+                  4: (self.center[1] - aim[1]) * height}
         rates = {}
         for addr, half_size in ((1, width / 2), (4, height / 2)):
             if abs(errors[addr]) <= self.config["tolerance_px"]:
@@ -127,7 +137,7 @@ class TargetLock:
                 rates[addr] = 0.0
             else:
                 rates[addr] = self.pids[addr].step(errors[addr] / half_size, dt)
-        return {"target": chosen, "errors": errors, "rates": rates}
+        return {"target": chosen, "errors": errors, "rates": rates, "size": size}
 
 
 def read_angle(motor):
@@ -145,7 +155,8 @@ def hold(bus):
     cleanup(*[(f"ID{addr} 保持当前位置", lambda addr=addr: hold_axis(addr)) for addr in AXES])
 
 
-def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=None, log=print):
+def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=None, log=print,
+        aim=None, on_update=None):
     """持续锁定直到取消或到达 duration；调用者负责关闭摄像头和总线。"""
     controller = TargetLock(target, config)
     cfg = controller.config
@@ -178,7 +189,8 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
                     fresh = -0.1 <= time.time() - stamp < VISION["frame_stale"]
                 if fresh:
                     dt = period if previous_stamp is None else max(1e-4, stamp - previous_stamp)
-                    result = controller.step(candidates, (frame.shape[1], frame.shape[0]), dt)
+                    result = controller.step(candidates, (frame.shape[1], frame.shape[0]), dt,
+                                             aim=aim.point() if aim is not None else (0.5, 0.5))
                     if result is not None:
                         current = {addr: read_angle(bus.motors[addr]) for addr in AXES}
                         check_cancel(stop_event)
@@ -216,6 +228,8 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
                 state = (f"锁定 {controller.color} | 偏差 x={errors[1]:+.1f}px y={errors[4]:+.1f}px"
                          f" | ID1={commands[1][0]:.2f}° ID4={commands[4][0]:.2f}°")
             now = time.monotonic()
+            if on_update is not None:
+                on_update(state, result)
             # 状态切换立即打印，跟踪数值最多每 0.5 秒打印一次。
             status = "tracking" if result is not None else state
             if status != previous_state or now >= next_log:
@@ -232,8 +246,12 @@ def main(args=None):
                         help="初次选靶的位置或颜色；默认选择最靠近画面中心的标靶")
     parser.add_argument("--camera", default=VISION["device"], help="摄像头编号或 /dev/video 路径")
     parser.add_argument("--port", default=None, help="机械臂 RS485 串口；默认读取 ARM 配置")
+    parser.add_argument("--web-host", default="0.0.0.0", help="瞄准点矫正网页监听地址")
+    parser.add_argument("--web-port", type=int, default=8080, help="瞄准点矫正网页端口，默认 8080")
+    parser.add_argument("--aim-file", type=Path, default=DEFAULT_AIM_FILE,
+                        help="瞄准点校正文件；启动时读取，网页点击保存后写入")
     for key, help_text in (("hz", "最高控制频率"), ("kp", "比例增益"), ("ki", "积分增益"),
-                           ("kd", "微分增益"), ("tolerance_px", "中心容差（像素）"),
+                           ("kd", "微分增益"), ("tolerance_px", "瞄准点容差（像素）"),
                            ("max_rate_deg_s", "最大角速度（度/秒）"), ("max_step_deg", "单次最大角度增量")):
         parser.add_argument("--" + key.replace("_", "-"), type=float, default=None, help=help_text)
     parser.add_argument("--duration", type=float, default=0.0, help="运行秒数；0 为持续锁定")
@@ -243,19 +261,37 @@ def main(args=None):
                                if hasattr(opts, key) and getattr(opts, key) is not None})
         if not math.isfinite(opts.duration) or opts.duration < 0:
             raise ValueError("--duration 必须为有限非负数")
+        if not 1 <= opts.web_port <= 65535:
+            raise ValueError("--web-port 必须为 1..65535")
         arm_cfg = ArmConfig(**({"port": opts.port} if opts.port is not None else {}))
     except ValueError as exc:
         parser.error(str(exc))
 
-    camera = bus = None
+    camera = bus = web = None
+    stop_event = threading.Event()
+
+    def interrupt(signum, frame):
+        stop_event.set()
+        raise KeyboardInterrupt
+
+    previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
+        aim = AimPoint(opts.aim_file)
+        web = TargetLockWeb(aim, opts.web_host, opts.web_port)
         camera = CameraStream(opts.camera)
         bus = MotorBus(arm_cfg.port, arm_cfg.baudrate, arm_cfg.serial_timeout,
                        latency_ms=arm_cfg.serial_latency_ms)
+        web.start(camera)
         print(f"锁靶选择：{opts.target}；PID Kp={cfg['kp']:g} Ki={cfg['ki']:g} Kd={cfg['kd']:g}。"
               f"ID2 保持 {cfg['motor2_angle_deg']:g}°。"
               "按 Ctrl+C 结束并保持当前角度。", flush=True)
+        web_address = "127.0.0.1" if opts.web_host == "0.0.0.0" else opts.web_host
+        print(f"瞄准点矫正网页：http://{web_address}:{web.port}", flush=True)
+        if opts.web_host == "0.0.0.0":
+            for address in local_addresses():
+                print(f"局域网：http://{address}:{web.port}", flush=True)
         run(camera, bus, opts.target, config=cfg, duration=opts.duration,
+            stop_event=stop_event, aim=aim, on_update=web.update,
             log=lambda message: print(message, flush=True))
     except (KeyboardInterrupt, MotionCancelled):
         print("锁靶已结束。", flush=True)
@@ -263,12 +299,17 @@ def main(args=None):
         print(f"锁靶失败：{exc}", file=sys.stderr, flush=True)
         return 1
     finally:
+        stop_event.set()
         actions = []
+        if web is not None:
+            actions.append(("瞄准点矫正网页关闭", web.close))
         if bus is not None:
             actions.append(("机械臂串口关闭", lambda: bus.close(disable_motors=False)))
         if camera is not None:
             actions.append(("摄像头关闭", camera.close))
         cleanup(*actions, raise_errors=False)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     return 0
 
 

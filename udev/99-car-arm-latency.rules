@@ -1,0 +1,4 @@
+# Arm RS485: FTDI FTBVQPDL, interface 00. Keep the receive latency at 1 ms.
+# USB identity and interface number belong to different parents; match in two rules.
+ACTION=="add|bind|change", SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", ATTRS{serial}=="FTBVQPDL", ENV{.CAR_ARM_ADAPTER}="1"
+ACTION=="add|bind|change", SUBSYSTEM=="usb-serial", ENV{.CAR_ARM_ADAPTER}=="1", ATTRS{bInterfaceNumber}=="00", TEST=="latency_timer", ATTR{latency_timer}="1"

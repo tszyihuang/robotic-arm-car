@@ -91,6 +91,33 @@ class TargetLockTests(unittest.TestCase):
         self.assertIsNone(lock.pids[1].previous)
         self.assertGreater(result["rates"][4], 0)
 
+    def test_calibrated_aim_controls_directions_and_tolerance(self):
+        lock = TargetLock()
+        result = lock.step([target("red", 550, 250)], (1000, 600), 0.05, aim=(0.6, 0.3))
+        self.assertAlmostEqual(result["errors"][1], -50)
+        self.assertAlmostEqual(result["errors"][4], 70)
+        self.assertLess(result["rates"][1], 0)
+        self.assertGreater(result["rates"][4], 0)
+        result = lock.step([target("red", 604, 183)], (1000, 600), 0.05, aim=(0.6, 0.3))
+        self.assertEqual(result["rates"], {1: 0, 4: 0})
+
+    def test_aim_change_resets_pid_history_and_keeps_the_selected_target(self):
+        lock = TargetLock(config={"kp": 1, "ki": 1, "kd": 10, "derivative_tau": 0})
+        lock.step([target("red", 600, 360)], (1000, 600), 0.1)
+        result = lock.step([target("green", 550, 330), target("red", 600, 360)],
+                           (1000, 600), 0.1, aim=(0.55, 0.55))
+        self.assertEqual(result["target"]["value"], "red")
+        for pid in lock.pids.values():
+            self.assertEqual(pid.derivative, 0)
+            self.assertAlmostEqual(pid.integral, 0.01)
+        for rate in result["rates"].values():
+            self.assertAlmostEqual(rate, 0.11)
+
+    def test_initial_selection_uses_image_center_even_with_a_calibrated_aim(self):
+        result = TargetLock().step([target("red", 500, 300), target("blue", 900, 300)],
+                                   (1000, 600), 0.05, aim=(0.9, 0.5))
+        self.assertEqual(result["target"]["value"], "red")
+
     def test_integral_and_derivative_terms_affect_the_control_output(self):
         pid = PID(validate_config({"kp": 1, "ki": 1, "kd": 0}))
         self.assertAlmostEqual(pid.step(0.5, 0.1), 0.55)
@@ -177,6 +204,22 @@ class TargetLockRunTests(unittest.TestCase):
         self.bus.motors[2].move.assert_called_once_with(12.0, speed_rpm=ARM["speed_rpm"])
         self.assertEqual(self.bus.motors[2].angle, 12.0)
         self.assertTrue(self.bus.motors[2].enabled)
+
+    def test_live_aim_changes_reach_motor_commands_on_the_next_frame(self):
+        aim = Mock()
+        aim.point.side_effect = [(0.5, 0.5), (0.8, 0.2)]
+        updates = Mock()
+        camera = self.scripted_camera([(image(), 1, 0), (image(), 2, 0)])
+        with self.assertRaises(KeyboardInterrupt):
+            run(camera, self.bus, aim=aim, on_update=updates, log=lambda message: None)
+        for addr, sign in ((1, 1), (4, -1)):
+            calls = self.bus.motors[addr].move.call_args_list
+            self.assertGreater(calls[0].args[0] * sign, 0)
+            self.assertLess((calls[1].args[0] - calls[0].args[0]) * sign, 0)
+        self.assertEqual(updates.call_count, 2)
+        self.assertLess(updates.call_args.args[1]["errors"][1], 0)
+        self.assertGreater(updates.call_args.args[1]["errors"][4], 0)
+        self.bus.motors[2].move.assert_called_once_with(12.0, speed_rpm=ARM["speed_rpm"])
 
     def test_motor2_command_failure_prevents_starting_target_tracking(self):
         self.bus.motors[2].move = Mock(side_effect=OSError("ID2 串口错误"))
@@ -301,12 +344,36 @@ class TargetLockRunTests(unittest.TestCase):
         self.bus.motors[2].move.assert_not_called()
 
     def test_cli_closes_both_resources_after_interruption(self):
-        camera, bus = Mock(), Mock()
+        camera, bus, web = Mock(), Mock(), Mock()
         with patch("tasks.lock_target.CameraStream", return_value=camera), \
                 patch("tasks.lock_target.MotorBus", return_value=bus), \
+                patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                patch("tasks.lock_target.local_addresses", return_value=[]), \
                 patch("tasks.lock_target.run", side_effect=KeyboardInterrupt) as task, \
                 patch("builtins.print"):
             self.assertEqual(main([]), 0)
         self.assertEqual(task.call_args.args[2], "middle")
         bus.close.assert_called_once_with(disable_motors=False)
         camera.close.assert_called_once()
+        web.start.assert_called_once_with(camera)
+        web.close.assert_called_once()
+        self.assertIs(task.call_args.kwargs["on_update"], web.update)
+        self.assertTrue(task.call_args.kwargs["stop_event"].is_set())
+
+    def test_web_bind_failure_does_not_open_hardware(self):
+        with patch("tasks.lock_target.TargetLockWeb", side_effect=OSError("端口已占用")), \
+                patch("tasks.lock_target.CameraStream") as camera, \
+                patch("tasks.lock_target.MotorBus") as bus, patch("builtins.print"):
+            self.assertEqual(main([]), 1)
+        camera.assert_not_called()
+        bus.assert_not_called()
+
+    def test_camera_failure_closes_the_bound_web_port(self):
+        web = Mock()
+        with patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                patch("tasks.lock_target.CameraStream", side_effect=RuntimeError("摄像头异常")), \
+                patch("tasks.lock_target.MotorBus") as bus, patch("builtins.print"):
+            self.assertEqual(main([]), 1)
+        web.close.assert_called_once()
+        web.start.assert_not_called()
+        bus.assert_not_called()
