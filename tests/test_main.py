@@ -48,12 +48,99 @@ class Recorder:
 
 
 class MissionTests(unittest.TestCase):
-    def run_tasks(self, text, *devices):
+    def run_tasks(self, text, *devices, section="主线"):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "tasks.txt"
             path.write_text(text, encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
-                main.run(*devices, tasks_path=path)
+                main.run(*devices, tasks_path=path, section=section)
+
+    def test_selected_ball_section_uses_file_in_order_without_starting_vision(self):
+        text = "[主线]\n未知指令\n[抓中间的小球]\narm-calibrate\n" \
+               "gripper-open\narm-move -94 132 133 -82\ngripper-close\narm-home\n" \
+               "[抓左边的小球]\n未知指令\n"
+        trace = []
+        base, arm = Recorder(trace), Recorder(trace)
+        vision = Mock()
+        self.run_tasks(text, base, arm, vision, section="抓中间的小球")
+        self.assertEqual(trace, [("arm-calibrate", ()), ("gripper-open", ()),
+                                 ("arm-move", (-94, 132, 133, -82)),
+                                 ("gripper-close", ()), ("arm-home", ())])
+        vision.start.assert_not_called()
+        vision.close.assert_called_once()
+
+    def test_ball_cli_executes_actual_task_section_with_simulated_arm(self):
+        arm = Arm(simulate=True)
+        arm.dry_run = True
+        bus, servo = arm._ensure_bus(), arm._ensure_servo()
+        base, vision = Mock(), Mock()
+        with patch('base.api.Base', return_value=base), \
+                patch('arm.api.Arm', return_value=arm), \
+                patch('vision.api.Vision', return_value=vision), \
+                patch.object(arm, 'calibrate', wraps=arm.calibrate) as calibrate, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            result = main.main(['--抓中间的小球'])
+        self.assertEqual(result, 0, output.getvalue())
+        calibrate.assert_called_once_with(hold_tool=True)
+        self.assertEqual([motor.angle for motor in bus.motors.values()], [0, 0, 0, 0])
+        self.assertTrue(bus.closed)
+        gripper_commands = [step.command for step in main.load_section(ROOT / 'tasks.txt', '抓中间的小球')
+                            if step.command in ('gripper-open', 'gripper-close')]
+        expected_angle = (arm.config.gripper_open_angle_deg if gripper_commands[-1] == 'gripper-open'
+                          else arm.config.gripper_close_angle_deg)
+        self.assertAlmostEqual(int.from_bytes(servo._ser.memories[2][56:58], 'little') * 360 / 4095,
+                               expected_angle, delta=0.1)
+        self.assertEqual(int.from_bytes(servo._ser.memories[1][56:58], 'little'), 340)
+        vision.start.assert_not_called()
+        vision.close.assert_called_once()
+        self.assertNotIn('[主线 ', output.getvalue())
+
+    def test_ball_cli_dry_run_prints_only_selected_section(self):
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'main.py'),
+                                 '--抓中间的小球', '--dry-run'], cwd='/tmp',
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = main.load_section(ROOT / 'tasks.txt', '抓中间的小球')
+        for index, step in enumerate(steps, 1):
+            self.assertIn(f'[抓中间的小球 {index}/{len(steps)}] {step.command}', result.stdout)
+        self.assertNotIn('[主线 ', result.stdout)
+        self.assertNotIn('detect-balls', result.stdout)
+
+    def test_cli_help_lists_every_task_section(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as exit:
+            main.main(['--help'])
+        self.assertEqual(exit.exception.code, 0)
+        for name in main.list_sections(ROOT / 'tasks.txt'):
+            self.assertIn(f'--{name}', output.getvalue())
+
+    def test_new_section_flag_is_discovered_and_empty_section_reports_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'tasks.txt'
+            path.write_text('[主线]\n未知指令\n[新增任务]\ngripper-open\n'
+                            '[空任务]\n# 暂未填写\n', encoding='utf-8')
+            with patch.object(main, 'TASKS_FILE', path), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main.main(['--新增任务', '--dry-run']), 0)
+                self.assertEqual(main.main(['--空任务', '--dry-run']), 1)
+            self.assertIn('[新增任务 1/1] gripper-open', output.getvalue())
+            self.assertIn('[空任务] 没有可执行指令', output.getvalue())
+            self.assertNotIn('[主线 ', output.getvalue())
+
+    def test_selecting_multiple_task_sections_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit:
+            main.main(['--抓左边的小球', '--抓中间的小球', '--dry-run'])
+        self.assertEqual(exit.exception.code, 2)
+
+    def test_left_ball_cli_dry_run_uses_left_section_only(self):
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'main.py'),
+                                 '--抓左边的小球', '--dry-run'], cwd='/tmp',
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = main.load_section(ROOT / 'tasks.txt', '抓左边的小球')
+        for index, step in enumerate(steps, 1):
+            self.assertIn(f'[抓左边的小球 {index}/{len(steps)}] {step.command}', result.stdout)
+        self.assertNotIn('[主线 ', result.stdout)
+        self.assertNotIn('[抓中间的小球 ', result.stdout)
 
     def test_task_table_explicit_disable_preserves_gripper_and_allows_next_move(self):
         for next_move in (False, True):
@@ -222,7 +309,7 @@ import main, os, signal, threading, time
 from unittest.mock import Mock, patch
 from tasks.runner import Step
 base, arm, vision = Mock(), Mock(), Mock()
-arm.calibrate.side_effect = lambda: time.sleep(10)
+arm.calibrate.side_effect = lambda **kwargs: time.sleep(10)
 base.stop.side_effect = lambda: print('base stopped')
 arm.cancel.side_effect = lambda: print('arm stopped')
 base.close.side_effect = lambda **kwargs: print('base closed')
@@ -249,8 +336,8 @@ with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_valu
                 buses = []
                 calibrate = arm.calibrate
 
-                def record_bus():
-                    result = calibrate()
+                def record_bus(**kwargs):
+                    result = calibrate(**kwargs)
                     buses.append(arm._bus)
                     return result
 

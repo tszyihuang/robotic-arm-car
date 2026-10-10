@@ -94,7 +94,8 @@ class Arm:
             except Exception as exc:
                 warnings.warn(f"机械臂停止失败：{exc}", RuntimeWarning)
 
-    def calibrate(self, *, stop_event=None):
+    def calibrate(self, *, stop_event=None, hold_tool=False):
+        """重建四轴软件基准；任务校准可同时使工具舵机 ID1 保持固定位置。"""
         event = self._event(stop_event)
         previous_initial = self._initial_joints
         previous_zero = None if self._arm is None else dict(self._arm.encoder_zero_deg)
@@ -116,6 +117,11 @@ class Arm:
                 self._initial_joints = None
                 self._arm.calibrate_zero(stop_event=event)
             check_cancel(event)
+            if hold_tool:
+                servo = self._ensure_servo()
+                check_cancel(event)
+                servo.hold_fixed_position(1)
+                check_cancel(event)
             self._initial_joints = dict(self._arm.config.joint_offsets_deg)
         except MotionCancelled:
             if self._arm is not None and previous_zero is not None:

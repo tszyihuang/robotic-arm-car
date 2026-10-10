@@ -81,7 +81,6 @@ ALIGN = {
 ARM = {
     "port": "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBVQPDL-if00-port0",
     "baudrate": 921600, "serial_timeout": 0.1, "serial_latency_ms": 1,
-    "joint_limits": {1: None, 2: (-5.0, 180.0), 3: (0.0, 160.0), 4: (-120.0, 120.0)},
     "joint_signs": {1: 1, 2: 1, 3: -1, 4: 1},
     "joint_offsets_deg": {1: 0.0, 2: 0.0, 3: 160.0, 4: 24.0},
     "encoder_zero_deg": None, "speed_rpm": 10.0,
@@ -94,7 +93,7 @@ ARM = {
 
 SERVO = {
     "default_id": 1, "baudrate": 1000000, "speed": 1000, "timeout": 0.1,
-    "fixed_positions": {1: 340},  # 工具旋转舵机保持原位置，夹爪 ID2 自由运动。
+    "fixed_positions": {1: 340},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
     "probe_baudrates": (1000000, 115200, 500000, 250000, 128000, 76800, 57600, 38400),
 }
 

@@ -86,7 +86,7 @@ class DeviceConstructionTests(unittest.TestCase):
                 arm.calibrate()
             before = arm._arm.get_joints()
             with self.assertRaises(ValueError):
-                arm.move_joints(0, 0, 170, 24)
+                arm.move_joints(0, 0, float('nan'), 24)
             self.assertEqual(arm._arm.get_joints(), before)
             self.assertTrue(all(not m.enabled for m in arm._bus.motors.values()))
         finally:

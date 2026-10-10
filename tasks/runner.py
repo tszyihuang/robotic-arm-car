@@ -1,4 +1,4 @@
-"""读取任务表的 [主线]，在执行前检查整段指令。"""
+"""读取任务表的指定段落，在执行前检查整段指令。"""
 from dataclasses import dataclass
 import math
 from pathlib import Path
@@ -36,7 +36,23 @@ class Step:
     args: tuple
 
 
+def list_sections(path):
+    """按文件顺序列出段落标题，包含空段落，同名标题只列一次。"""
+    sections = []
+    for raw in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        text = raw.split("#", 1)[0].strip()
+        if text.startswith("[") and text.endswith("]"):
+            name = text[1:-1]
+            if name and name not in sections:
+                sections.append(name)
+    return sections
+
+
 def load_main(path):
+    return load_section(path, "主线")
+
+
+def load_section(path, section):
     path = Path(path)
     steps = []
     found = False
@@ -47,7 +63,7 @@ def load_main(path):
         if text.startswith("[") and text.endswith("]"):
             if found:
                 break
-            found = text == "[主线]"
+            found = text == f"[{section}]"
             continue
         if not found:
             continue
@@ -66,9 +82,9 @@ def load_main(path):
             raise ValueError(f"{path.name}:{line}：{exc}") from exc
         steps.append(Step(line, command, args))
     if not found:
-        raise ValueError(f"{path.name} 缺少 [主线] 段")
+        raise ValueError(f"{path.name} 缺少 [{section}] 段")
     if not steps:
-        raise ValueError(f"{path.name} 的 [主线] 没有可执行指令")
+        raise ValueError(f"{path.name} 的 [{section}] 没有可执行指令")
     return steps
 
 
@@ -83,6 +99,8 @@ def execute(step, base, arm, vision, *, stop_event=None):
         result = detect_ball.run(device)
     elif step.command == "calibrate-ball-position":
         result = calibrate_ball_position.run(base, vision, stop_event=stop_event)
+    elif step.command == "arm-calibrate":
+        result = device.calibrate(hold_tool=True)
     else:
         result = getattr(device, method)(*args)
     check_cancel(stop_event)

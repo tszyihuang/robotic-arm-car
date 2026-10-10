@@ -1,5 +1,5 @@
 """只打印动作的设备；与实机共用 tasks.txt 的 [主线] 指令。"""
-from config import BASE, ARM, VISION, POSITION, ALIGN, VISION_CONTROL
+from config import BASE, ARM, SERVO, VISION, POSITION, ALIGN, VISION_CONTROL
 
 
 class DryBase:
@@ -38,8 +38,14 @@ class DryBase:
 class DryArm:
     dry_run = True
 
-    def calibrate(self):
-        print("arm.calibrate()  # 读取软件基准，不运动")
+    def calibrate(self, *, hold_tool=False):
+        if hold_tool:
+            position = SERVO['fixed_positions'][1]
+            angle = position * 360 / 4095
+            print(f"arm.calibrate(hold_tool=True)  # 读取四轴软件基准，"
+                  f"舵机 ID1 使能并保持位置 {position}（{angle:.2f}°）")
+        else:
+            print("arm.calibrate()  # 读取软件基准，不运动")
 
     def disable(self):
         print("arm.disable()  # ID1-4 失能，夹爪保持")

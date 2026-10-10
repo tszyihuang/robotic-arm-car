@@ -141,8 +141,8 @@ class FeetechSTSServo:
         size = _integer(size, "读取长度", 1, min(64, 256 - address))
         return self._exchange(0x02, bytes((address, size)), size, servo_id=servo_id)
 
-    def _write_register(self, address, data):
-        return self._exchange(0x03, bytes((address,)) + data)
+    def _write_register(self, address, data, *, servo_id=None):
+        return self._exchange(0x03, bytes((address,)) + data, servo_id=servo_id)
 
     def read_position(self):
         """返回编码器位置整数；STS 的负值按符号幅值解码。"""
@@ -163,9 +163,6 @@ class FeetechSTSServo:
 
     def enable_torque(self):
         """显式使能；move_to 会先写目标再使能，避免恢复旧位置目标。"""
-        if self.servo_id in SERVO_FIXED_POSITIONS:
-            self.move_to(SERVO_FIXED_POSITIONS[self.servo_id])
-            return
         self._write_register(TORQUE_ENABLE, b"\x01")
 
     def disable_torque(self):
@@ -193,10 +190,6 @@ class FeetechSTSServo:
         target = _integer(target_position, "目标位置", 0, 4095)
         speed = _integer(self.speed if target_speed is None else target_speed, "舵机速度", 1, 3400)
         target_time = _integer(target_time, "目标时间", 0, 65535)
-        fixed = SERVO_FIXED_POSITIONS.get(self.servo_id)
-        if fixed is not None and target != fixed:
-            raise ValueError(f"舵机 ID{self.servo_id} 已锁定在位置 {fixed}"
-                             f"（{fixed / SERVO_STEP_PER_DEG:.2f}°），不能设置其他位置")
         with self._lock:
             try:
                 if self.read_register(MODE, 1)[0] != 0:
@@ -222,15 +215,8 @@ class FeetechSTSServo:
     def move_relative_deg(self, delta_deg, target_speed=None, *, wait=False):
         """保留原项目正=逆时针的映射；模 4096，仅给出最终单圈目标。"""
         delta = finite(delta_deg, "舵机相对角度")
-        if not -360 < delta < 360:
-            raise ValueError("单圈位置模式不支持一次旋转整圈或多圈，相对角度必须在 (-360, 360)° 内")
         if target_speed is not None:
             _integer(target_speed, "舵机速度", 1, 3400)
-        fixed = SERVO_FIXED_POSITIONS.get(self.servo_id)
-        if fixed is not None:
-            if delta != 0:
-                raise ValueError(f"舵机 ID{self.servo_id} 已锁定在位置 {fixed}，不能相对旋转")
-            return self.move_to(fixed, target_speed, wait=wait)
         with self._lock:
             try:
                 current = _integer(self.read_position(), "实测单圈位置", 0, 4095)
@@ -262,9 +248,31 @@ class FeetechSTSServo:
 
     def hold(self):
         with self._lock:
-            if self.servo_id in SERVO_FIXED_POSITIONS:
-                return self.move_to(SERVO_FIXED_POSITIONS[self.servo_id])
             return self.move_to(self.read_position())
+
+    def hold_fixed_position(self, servo_id):
+        """复用当前 TTL 连接，使指定舵机保持配置中的固定位置。"""
+        address = _integer(servo_id, "舵机 ID", 0, 253)
+        target = SERVO_FIXED_POSITIONS.get(address)
+        if target is None:
+            raise ValueError(f"舵机 ID{address} 未配置固定位置")
+        target = _integer(target, "固定位置", 0, 4095)
+        with self._lock:
+            if address == self.servo_id:
+                return self.move_to(target)
+            if self.read_register(MODE, 1, servo_id=address)[0] != 0:
+                raise ValueError(f"舵机 ID{address} 只支持单圈位置模式（mode=0）")
+            try:
+                self._write_register(GOAL_POSITION, struct.pack("<HHH", target, 0, self.speed),
+                                     servo_id=address)
+                self._write_register(TORQUE_ENABLE, b"\x01", servo_id=address)
+            except BaseException:
+                try:
+                    self._write_register(TORQUE_ENABLE, b"\x00", servo_id=address)
+                except Exception as exc:
+                    warnings.warn(f"舵机 ID{address} 异常后关闭扭矩失败：{exc}", RuntimeWarning)
+                raise
+        return target
 
     def close(self):
         with self._lock:

@@ -1,4 +1,4 @@
-"""比赛所需的串口、电机映射、关节限位和夹爪配置。"""
+"""比赛所需的串口、电机映射和夹爪配置。"""
 
 import math
 from copy import deepcopy
@@ -16,7 +16,7 @@ def finite(value, name):
 
 
 class ArmConfig:
-    """对根目录 ARM 字典做现有端口、限位和协议校验。"""
+    """对根目录 ARM 字典做端口和协议校验。"""
 
     def __init__(self, **overrides):
         unknown = overrides.keys() - ARM.keys()
@@ -60,7 +60,7 @@ class ArmConfig:
             raise ValueError("夹爪张开和闭合角度不能相同")
         if not isinstance(self.gripper_release_on_close, bool):
             raise ValueError("gripper_release_on_close 必须为 bool")
-        for name in ("joint_limits", "joint_signs", "joint_offsets_deg", "encoder_zero_deg"):
+        for name in ("joint_signs", "joint_offsets_deg", "encoder_zero_deg"):
             value = getattr(self, name)
             if name == "encoder_zero_deg" and value is None:
                 continue
@@ -70,15 +70,6 @@ class ArmConfig:
                 raise ValueError(f"{name} 必须完整包含关节 1-4")
             setattr(self, name, {int(k): v for k, v in value.items()})
         for addr in JOINT_IDS:
-            bounds = self.joint_limits[addr]
-            # ID1 的 None 表示取消软件角度限位；仍检查方向、偏置与编码器零点。
-            if addr != 1 or bounds is not None:
-                if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
-                    raise ValueError(f"ID{addr} 限位必须包含上下界")
-                lo, hi = (finite(v, f"ID{addr} 限位") for v in bounds)
-                if lo >= hi:
-                    raise ValueError(f"ID{addr} 限位上下界无效")
-                self.joint_limits[addr] = (lo, hi)
             if isinstance(self.joint_signs[addr], bool) or self.joint_signs[addr] not in (-1, 1):
                 raise ValueError(f"ID{addr} 方向必须是 +1 或 -1")
             finite(self.joint_offsets_deg[addr], f"ID{addr} 偏置")
