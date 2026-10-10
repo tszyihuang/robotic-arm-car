@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class DebugEntrypointTests(unittest.TestCase):
     def test_scripts_start_from_another_directory_in_isolated_python(self):
         with tempfile.TemporaryDirectory() as folder:
-            for script in ('debug/camera_web.py', 'debug/angles.py', 'tasks/detect_ball.py'):
+            for script in ('debug/camera_web.py', 'debug/angles.py', 'tasks/detect_ball.py', 'tasks/lock_target.py'):
                 with self.subTest(script=script):
                     result = subprocess.run(
                         [sys.executable, '-I', '-B', str(ROOT / script), '--help'],
@@ -21,7 +21,7 @@ class DebugEntrypointTests(unittest.TestCase):
                     self.assertIn('usage:', result.stdout)
 
     def test_module_entrypoints_still_start_from_project_root(self):
-        for module in ('debug.camera_web', 'debug.angles', 'tasks.detect_ball'):
+        for module in ('debug.camera_web', 'debug.angles', 'tasks.detect_ball', 'tasks.lock_target'):
             with self.subTest(module=module):
                 result = subprocess.run(
                     [sys.executable, '-B', '-m', module, '--help'],

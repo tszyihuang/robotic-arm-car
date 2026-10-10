@@ -68,6 +68,7 @@ python3 main.py
 | `tasks/scan.py` | 抬头扫码与回位 |
 | `tasks/ball.py` | 小球观察与夹球动作 |
 | `tasks/detect_ball.py` | 按左、中、右打印 YOLO 小球颜色 |
+| `tasks/lock_target.py` | 独立锁定彩色标靶，两轴 PID 控制电机 ID1、ID4 |
 | `tasks/calibrate_ball_position.py`、`base/ball_position.py` | 小球校准任务入口与共用连续 PID 位置控制 |
 | `tasks/calibrate_object_position.py`、`base/object_position.py` | 物品校准任务入口与独立参数 |
 | `tasks/target.py`、`tasks/delivery.py` | 待填写的打靶、取放物体动作 |
@@ -111,10 +112,17 @@ python3 -m debug.camera_web --port 8080
 python3 -m debug.angles --hz 5
 python3 -m debug.angles --hz 5 --duration 10 --json
 python3 tasks/detect_ball.py
+python3 tasks/lock_target.py
 bash tests/run.sh -q
 ```
 
 `python3 tasks/detect_ball.py` 独立打开摄像头，只加载物体 YOLO 模型，默认推理完成立即打印并读取下一帧。终端显示模型路径与类别、每帧识别类别、置信度、中心坐标、小球数量、推理耗时和帧龄；三个球可排序时打印左、中、右颜色，缺球时持续显示当前结果。调试入口立即打印，不等待主线的连续稳定确认。按 `Ctrl+C` 退出并关闭摄像头。支持 `--camera 0`、`--device cpu`、`--conf 0.15`、`--once`；显式传入 `--hz 5` 可限制最高频率，`--image screenshots/图片.jpg` 可用已有图片检测一次。也可通过 `python3 -m tasks.detect_ball` 启动。
+
+`python3 tasks/lock_target.py` 独立打开摄像头和机械臂 RS485，复用现有 HSV 红、绿、蓝色块标靶识别。无参数时选择最靠近画面中心的目标；可传 `left`、`middle`、`right` 选择初始位置，或 `red`、`green`、`blue` 指定颜色，例如 `python3 tasks/lock_target.py red`。首次锁定后按颜色和邻近位置跟踪同一目标，不随左右顺序变化重新选靶；目标丢失时保持当前位置，保留目标身份，重新出现且位置匹配后继续跟踪。无需三个靶同时可见。
+
+横向误差驱动 ID1：目标偏左减角，偏右增角；纵向误差驱动 ID4：目标偏上减角，偏下增角。两轴各用独立 PID，误差按画面半宽/半高归一化，输出角速度（°/s），再乘新帧时间间隔生成角度增量；每次目标角基于当前编码器反馈，并按编码器精度（约 0.022°）量化，避免小修正被协议截成零。默认容差 ±8 px、最大角速度 150°/s（25 rpm）、单次增量最多 10°，进入容差后保持该轴当前角度。速度上限只限制 PID 输出，提高上限不会自动放大 PID 算出的速度。PID 带微分滤波、积分抗饱和，缺靶或画面过期时清除 PID 历史。启动跟踪时，机械臂电机 ID2 移至 12° 并由位置环持续保持，速度读取 `ARM['speed_rpm']`；固定角度由 `TARGET_LOCK['motor2_angle_deg']` 配置。ID1、ID4 负责标靶跟踪，ID3 保持原状。角度直接使用多圈编码器角，无需软件归零。
+
+参数在 `config.py` 的 `TARGET_LOCK` 中调整，也可使用 `--kp 30 --ki 0 --kd 0.3 --hz 20 --tolerance-px 8 --max-rate-deg-s 150 --max-step-deg 10` 临时覆盖。摄像头和机械臂串口支持 `--camera 0 --port /dev/ttyUSB0`；`--duration 10` 运行 10 秒后退出。缺靶或按 `Ctrl+C` 结束时，ID1、ID4 保持当前位置，ID2 保留 12° 的位置目标；退出后关闭连接。支持 `python3 -m tasks.lock_target` 和从任意目录运行脚本绝对路径。
 
 摄像头和角度调试也可在项目根目录直接运行脚本，或使用绝对路径从任意目录启动：
 

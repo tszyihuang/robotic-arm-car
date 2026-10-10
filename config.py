@@ -118,3 +118,14 @@ VISION = {
     "objects_weights": ROOT / "vision/models/objects/weights.pt",
     "objects_args": ROOT / "vision/models/objects/args.yaml",
 }
+
+TARGET_LOCK = {
+    "motor2_angle_deg": 12.0,  # 跟踪期间由电机位置环保持的多圈编码器角度。
+    # 两轴各自使用 PID；误差除以对应画面半宽/半高，输出为 °/s。
+    "kp": 60.0, "ki": 0, "kd": 0.3, "derivative_tau": 0.1,
+    "hz": 100.0, "tolerance_px": 8.0,
+    "max_rate_deg_s": 150.0, "max_step_deg": 10.0,
+    # 同色候选按前一帧的位置匹配，距离以画面宽、高归一化。
+    "match_distance_ratio": 0.25,
+    "min_area_ratio": VISION["target_min_area_ratio"],
+}
