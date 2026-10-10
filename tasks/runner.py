@@ -6,6 +6,7 @@ from pathlib import Path
 from . import pause
 from . import detect_ball
 from . import calibrate_ball_position
+from . import calibrate_object_position
 from base.control import check_cancel
 
 
@@ -15,6 +16,7 @@ COMMANDS = {
     "turn": ("base", "turn", (1, 2)),
     "calibrate-position": ("base", "calibrate_position", (0,)),
     "calibrate-ball-position": ("base", "calibrate_ball_position", (0,)),
+    "calibrate-object-position": ("base", "calibrate_object_position", (0,)),
     "align": ("base", "align", (0,)),
     "vision-straight": ("base", "vision_straight", (1,)),
     "arm-calibrate": ("arm", "calibrate", (0,)),
@@ -99,6 +101,8 @@ def execute(step, base, arm, vision, *, stop_event=None):
         result = detect_ball.run(device)
     elif step.command == "calibrate-ball-position":
         result = calibrate_ball_position.run(base, vision, stop_event=stop_event)
+    elif step.command == "calibrate-object-position":
+        result = calibrate_object_position.run(base, vision, stop_event=stop_event)
     elif step.command == "arm-calibrate":
         result = device.calibrate(hold_tool=True)
     else:

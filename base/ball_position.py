@@ -1,4 +1,4 @@
-"""小球校准：视觉给出编码器目标位置，位置 PID 串级轮速 PI。"""
+"""小球及物品共用位置控制：视觉目标位置 → 位置 PID → 轮速 PI。"""
 from collections import deque
 import math
 import time
@@ -11,18 +11,22 @@ from .feedback import WheelOdometry
 
 
 def validate_config(config=None):
-    cfg = {**BALL_POSITION, **({} if config is None else config)}
+    return _validate_config(config, defaults=BALL_POSITION, config_name="BALL_POSITION", label="小球")
+
+
+def _validate_config(config, *, defaults, config_name, label):
+    cfg = {**defaults, **({} if config is None else config)}
     for name in ("speed", "tolerance_px", "mm_per_px", "position_tolerance_mm", "kp",
                  "accel", "loop_hz", "speed_tolerance", "speed_window", "lost_timeout", "max_distance_m", "timeout"):
         if not math.isfinite(cfg[name]) or cfg[name] <= 0:
-            raise ValueError(f"BALL_POSITION[{name!r}] 必须为有限正数")
+            raise ValueError(f"{config_name}[{name!r}] 必须为有限正数")
     for name in ("ki", "kd", "derivative_tau", "settle", "speed_kp", "speed_ki", "min_speed", "brake_tau"):
         if not math.isfinite(cfg[name]) or cfg[name] < 0:
-            raise ValueError(f"BALL_POSITION[{name!r}] 必须为有限非负数")
+            raise ValueError(f"{config_name}[{name!r}] 必须为有限非负数")
     if cfg["speed"] > straight.SPEED_LIMIT:
-        raise ValueError(f"小球校准速度不能超过 {straight.SPEED_LIMIT:g} mm/s")
+        raise ValueError(f"{label}校准速度不能超过 {straight.SPEED_LIMIT:g} mm/s")
     if type(cfg["stable_frames"]) is not int or cfg["stable_frames"] < 1:
-        raise ValueError("小球校准 stable_frames 必须为正整数")
+        raise ValueError(f"{label}校准 stable_frames 必须为正整数")
     return cfg
 
 
@@ -89,31 +93,41 @@ class EncoderSpeed:
 
 
 def middle_ball(layout):
+    return _middle_candidate(layout, label="小球")
+
+
+def _middle_candidate(layout, *, label):
     size = layout.get("size")
     if (not isinstance(size, (list, tuple)) or len(size) != 2
             or any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in size)):
-        raise ValueError("小球位置校准缺少有效的原图尺寸，已停车")
-    balls = layout["candidates"]
+        raise ValueError(f"{label}位置校准缺少有效的原图尺寸，已停车")
+    candidates = layout["candidates"]
     width = size[0]
-    if any(not math.isfinite(ball["center_x"]) or not 0 <= ball["center_x"] < width for ball in balls):
-        raise ValueError("小球横坐标超出画面，已停车")
+    if any(not math.isfinite(row["center_x"]) or not 0 <= row["center_x"] < width for row in candidates):
+        raise ValueError(f"{label}横坐标超出画面，已停车")
     try:
-        ordered = ordered_candidates(balls)
+        ordered = ordered_candidates(candidates)
     except ValueError:
         return None, width
     return ordered[1], width
 
 
 def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=print):
+    return _calibrate_layout_position(board, vision, config=config, stop_event=stop_event, log=log,
+                                      kind="ball", label="小球", validator=validate_config)
+
+
+def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, label, validator):
     """连续控制，不调用定距离 straight()；所有退出路径都发送零速度。"""
     try:
         check_cancel(stop_event)
-        cfg = validate_config(config)
+        cfg = validator(config)
         board.stop()
         started = time.monotonic()
         deadline = started + cfg["timeout"]
         # 加载与首次观察期间保持静止；后续只读取后台缓存，不阻塞控制环。
-        first = vision.observe_ball_layout(timeout=min(cfg["timeout"], VISION["observe_timeout"]))
+        first = getattr(vision, f"observe_{kind}_layout")(
+            timeout=min(cfg["timeout"], VISION["observe_timeout"]))
         check_cancel(stop_event)
         wheels = WheelOdometry.read_origin(board, stop_event)
         position = PositionPID(cfg)
@@ -127,7 +141,7 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
         history_window = min(cfg["lost_timeout"], VISION["frame_stale"]) + BASE["feedback_stale"]
         last_index = last_stamp = None
         last_valid_stamp = None
-        color = None
+        identity = None
         centered = 0
         in_band = usable = False
         settled_since = None
@@ -141,7 +155,7 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
         target_position = position_error = 0.0
         center_x = center_line = 0.0
         last_visual_state = None
-        log(f"开始小球位置 PID 校准：视觉换算 {cfg['mm_per_px']:g}mm/px，"
+        log(f"开始{label}位置 PID 校准：视觉换算 {cfg['mm_per_px']:g}mm/px，"
             f"最大速度 {cfg['speed']:g}mm/s，中心容差 ±{cfg['tolerance_px']:g}px，"
             f"位置容差 ±{cfg['position_tolerance_mm']:g}mm")
 
@@ -149,7 +163,7 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
             check_cancel(stop_event)
             tick = time.monotonic()
             if tick >= deadline:
-                raise TimeoutError("小球位置校准超时，已停车")
+                raise TimeoutError(f"{label}位置校准超时，已停车")
             dt = clamp(tick - last_tick, 1e-4, 0.05)
             last_tick = tick
             totals, increments = board.feedback(0.0)
@@ -168,14 +182,14 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                 last_steps = tick
             wheels.speed(increments)  # 保留独立的轮速帧就绪与断流检查。
             if tick - last_totals >= BASE["feedback_stale"] or tick - last_steps >= BASE["feedback_stale"]:
-                raise RuntimeError("小球位置校准编码器里程或轮速断流，已停车")
+                raise RuntimeError(f"{label}位置校准编码器里程或轮速断流，已停车")
             if travel >= cfg["max_distance_m"] * 1000:
-                raise RuntimeError("小球位置校准达到累计移动距离上限，已停车")
+                raise RuntimeError(f"{label}位置校准达到累计移动距离上限，已停车")
             if abs(gap) > straight.GAP_DEV_MAX:
-                raise RuntimeError("小球位置校准左右里程差过大，已停车")
+                raise RuntimeError(f"{label}位置校准左右里程差过大，已停车")
 
             new_layout = False
-            layout = first if first is not None else vision.ball_layout_sample()
+            layout = first if first is not None else getattr(vision, f"{kind}_layout_sample")()
             first = None
             if layout is not None:
                 index, stamp = layout["frame_index"], layout["capture_stamp"]
@@ -184,12 +198,12 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                         and -0.1 <= age < min(cfg["lost_timeout"], VISION["frame_stale"])):
                     last_index, last_stamp = index, stamp
                     new_layout = True
-                    middle, width = middle_ball(layout)
+                    middle, width = _middle_candidate(layout, label=label)
                     usable = middle is not None
                     if usable:
-                        if color is not None and middle["value"] != color:
-                            raise RuntimeError("中间小球身份发生变化，已停止位置校准")
-                        color = middle["value"]
+                        if identity is not None and middle["value"] != identity:
+                            raise RuntimeError(f"中间{label}身份发生变化，已停止位置校准")
+                        identity = middle["value"]
                         center_x, center_line = middle["center_x"], width / 2
                         error = center_x - center_line
                         last_valid_stamp = stamp
@@ -203,10 +217,11 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                         position.reset()
             stale = last_valid_stamp is None or time.time() - last_valid_stamp >= min(
                 cfg["lost_timeout"], VISION["frame_stale"])
-            visual_state = "缺球" if not usable else "画面过期" if stale else "有效"
+            missing = "缺球" if kind == "ball" else "缺物品"
+            visual_state = missing if not usable else "画面过期" if stale else "有效"
             position_error = target_position - distance
             if not usable or stale:
-                # 新帧缺球立即断速；重复或过期帧不能延长视觉有效期。
+                # 新帧缺少候选立即断速；重复或过期帧不能延长视觉有效期。
                 board.stop()
                 target = command_l = command_r = 0.0
                 target_position = distance
@@ -220,7 +235,7 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                 head.i = speed_l.i = speed_r.i = 0.0
                 lost_for = tick - waiting_since if last_valid_stamp is None else time.time() - last_valid_stamp
                 if lost_for >= cfg["lost_timeout"]:
-                    raise TimeoutError("小球位置校准视觉断流或持续缺球，已停车")
+                    raise TimeoutError(f"{label}位置校准视觉断流或持续{missing}，已停车")
             else:
                 position_reached = abs(position_error) <= cfg["position_tolerance_mm"]
                 velocity = (v_l + v_r) / 2
@@ -289,9 +304,11 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                     phase = "停稳"
                 if (stopped and in_band and position_reached and centered >= cfg["stable_frames"]
                         and fresh_after_stop and last_index != brake_frame):
-                    log(f"小球位置校准完成：球心 x={center_x:.1f}px，"
+                    center_label = "球心" if kind == "ball" else "物品中心"
+                    log(f"{label}位置校准完成：{center_label} x={center_x:.1f}px，"
                         f"中心线 x={center_line:.1f}px，偏差 {error:+.1f}px")
-                    return {"ok": True, "color": color, "center_x": center_x,
+                    identity_key = "color" if kind == "ball" else "shape"
+                    return {"ok": True, identity_key: identity, "center_x": center_x,
                             "error_px": error, "distance_m": distance / 1000,
                             "target_position_mm": target_position, "position_error_mm": position_error,
                             "travel_m": travel / 1000, "elapsed": tick - started}
@@ -308,8 +325,8 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                     f"轮速指令 {command_l:+.1f}/{command_r:+.1f}mm/s，"
                     f"实测轮速 {v_l:+.1f}/{v_r:+.1f}mm/s，状态{phase}，"
                     f"视觉{visual_state}，帧 {last_index}，帧龄 {frame_age:.3f}s")
-            first = vision.wait_ball_layout(
+            first = getattr(vision, f"wait_{kind}_layout")(
                 after=last_index, stop_event=stop_event,
                 timeout=max(0.0, 1 / cfg["loop_hz"] - (time.monotonic() - tick)))
     finally:
-        cleanup(("小球校准停车", board.stop))
+        cleanup((f"{label}校准停车", board.stop))

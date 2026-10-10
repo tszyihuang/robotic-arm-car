@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from debug.dry_run import DryVision
 from tasks import detect_ball
-from tasks.runner import Step, execute, load_main
+from tasks.runner import Step, execute, load_section
 from config import ROOT
 from tests.test_vision_api import ContinuousCamera
 from vision.api import Vision
@@ -168,8 +168,8 @@ class BallDetectionTests(unittest.TestCase):
         for name in ("圆锥", "圆柱", "腰鼓"):
             self.assertIn(name, message)
 
-    def test_actual_main_has_detection_and_dry_run_does_not_invent_results(self):
-        self.assertIn("detect-balls", [step.command for step in load_main(ROOT / "tasks.txt")])
+    def test_route_has_detection_and_dry_run_does_not_invent_results(self):
+        self.assertIn("detect-balls", [step.command for step in load_section(ROOT / "tasks.txt", "跑图")])
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = execute(Step(1, "detect-balls", ()), None, None, DryVision())
         self.assertIsNone(result)

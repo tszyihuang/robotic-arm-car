@@ -83,8 +83,8 @@ def validate_target(kind, value):
 def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
             min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None,
             candidate_source=None):
-    # ball + None 观察全部小球的顺序，不指定要抓取的颜色。
-    layout_only = kind == 'ball' and value is None
+    # 不指定颜色/形状时观察全部小球或物品的左右顺序。
+    layout_only = kind in ('ball', 'object') and value is None
     if not layout_only:
         validate_target(kind, value)
     # 不复用移动途中或上一个任务留下的画面。

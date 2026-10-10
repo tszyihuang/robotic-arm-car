@@ -14,7 +14,7 @@ from base.control import MotionCancelled
 from config import BASE, BALL_POSITION
 from debug.dry_run import DryBase, DryVision
 from tasks.calibrate_ball_position import run
-from tasks.runner import execute, load_main, Step
+from tasks.runner import execute, load_section, Step
 from tests.test_vision_api import ContinuousCamera
 from vision.api import Vision
 
@@ -384,7 +384,7 @@ class ContinuousBallPositionTests(unittest.TestCase):
 
 class BallPositionTaskTests(unittest.TestCase):
     def test_command_runs_before_home_and_dry_run_shows_pid_without_hardware(self):
-        commands = [step.command for step in load_main(ROOT / "tasks.txt")]
+        commands = [step.command for step in load_section(ROOT / "tasks.txt", "跑图")]
         index = commands.index("calibrate-ball-position")
         self.assertEqual(commands[index - 1], "detect-balls")
         self.assertEqual(commands[index + 1], "home")

@@ -131,8 +131,19 @@ class Vision:
         """读取调用后新帧的三个球坐标及同一原图尺寸，供位置校准使用。"""
         return self._observe("ball", None, timeout=timeout, stable_frames=1, include_size=True)
 
+    def observe_object_layout(self, *, timeout=None):
+        """读取新帧的三个物品坐标及同一原图尺寸，不预先指定形状。"""
+        return self._observe("object", None, timeout=timeout, stable_frames=1, include_size=True)
+
     def ball_layout_sample(self):
         """非阻塞读取最新物体推理；保留缺球帧，让连续控制及时停车。"""
+        return self._layout_sample("ball")
+
+    def object_layout_sample(self):
+        """非阻塞读取圆柱、圆锥、腰鼓；保留缺物品帧供控制器停车。"""
+        return self._layout_sample("object")
+
+    def _layout_sample(self, kind):
         with self.condition:
             self._check_open()
             if self.camera is not None and self.camera.error:
@@ -144,18 +155,27 @@ class Vision:
             info, index, stamp = self._objects
             if not -0.1 <= self._clock() - stamp < self.config["frame_stale"]:
                 return None
-            return {"size": info.get("size"), "candidates": candidates_from_detections(info["detections"], "ball"),
+            return {"size": info.get("size"), "candidates": candidates_from_detections(info["detections"], kind),
                     "frame_index": index, "capture_stamp": stamp}
 
     def wait_ball_layout(self, *, after, timeout, stop_event=None):
         """新物体结果发布即唤醒；到控制周期截止仍无新结果时返回 None。"""
+        return self._wait_layout(self.ball_layout_sample, after=after, timeout=timeout,
+                                 stop_event=stop_event, label="小球")
+
+    def wait_object_layout(self, *, after, timeout, stop_event=None):
+        """等待下一帧物品结果，不重复消费当前帧。"""
+        return self._wait_layout(self.object_layout_sample, after=after, timeout=timeout,
+                                 stop_event=stop_event, label="物品")
+
+    def _wait_layout(self, sample_layout, *, after, timeout, stop_event, label):
         if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("等待小球结果的时间必须为有限非负数")
+            raise ValueError(f"等待{label}结果的时间必须为有限非负数")
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
                 check_cancel(stop_event)
-                sample = self.ball_layout_sample()
+                sample = sample_layout()
                 if sample is not None and sample["frame_index"] != after:
                     return sample
                 remaining = deadline - time.monotonic()

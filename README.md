@@ -26,11 +26,11 @@ python3 main.py --help
 
 机械臂任务段落开头应安排 `arm-calibrate`，将启动时四轴当前位置设为软件基准，并使舵机 ID1 保持固定位置；请在启动前将机械臂摆到对应 `0 0 160 24` 的初始姿态。纯机械臂任务不启动摄像头和 YOLO。
 
-可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`。扫码只输出识别结果，不自动调用其他段或抓球分支。
+可用指令：`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`。扫码只输出识别结果，不自动调用其他段或抓球分支。
 
-`detect-balls` 调用 `tasks/detect_ball.py`，复用后台 YOLO 物体模型的小球识别结果。按三个球的检测框中心从左到右排序为左、中、右，颜色直接读取模型类别（红、绿、蓝）。等待三个球完整可见且顺序连续稳定后，逐个打印，例如 `小球位置：左，颜色：红色`；缺球或位置重叠会继续等待，超时后停止。当前主线已在机械臂到达观察姿态后加入该指令。干跑仅打印检测步骤。
+`detect-balls` 调用 `tasks/detect_ball.py`，复用后台 YOLO 物体模型的小球识别结果。按三个球的检测框中心从左到右排序为左、中、右，颜色直接读取模型类别（红、绿、蓝）。等待三个球完整可见且顺序连续稳定后，逐个打印，例如 `小球位置：左，颜色：红色`；缺球或位置重叠会继续等待，超时后停止。当前 `[跑图]` 段已在机械臂到达观察姿态后加入该指令。干跑仅打印检测步骤。
 
-`calibrate-ball-position` 无参数，已放在主线 `detect-balls` 后、机械臂回位前。按三个球的检测框中心横坐标取中间球，以同一帧原图宽度的一半作为屏幕中心线；中间球偏左就后退，偏右就前进。每个有效视觉新帧将横向误差乘以 `mm_per_px` 换算成前后位移，再加上图像采集时刻的编码器里程，生成目标位置。控制器保存近期里程并插值匹配采集时间，补偿图像推理延迟；目标位置在两个视觉新帧之间保持不变。
+`calibrate-ball-position` 无参数，已放在 `[跑图]` 段的 `detect-balls` 后、机械臂回位前。按三个球的检测框中心横坐标取中间球，以同一帧原图宽度的一半作为屏幕中心线；中间球偏左就后退，偏右就前进。每个有效视觉新帧将横向误差乘以 `mm_per_px` 换算成前后位移，再加上图像采集时刻的编码器里程，生成目标位置。控制器保存近期里程并插值匹配采集时间，补偿图像推理延迟；目标位置在两个视觉新帧之间保持不变。
 
 100 Hz 底盘控制环使用“目标位置 − 编码器当前位置”的毫米误差更新位置 PID，输出前后目标速度；左右里程差 PID 保持直行，主机轮速 PI 修正速度，再传给驱动板自身的速度 PID。驱动板已有积分，主机轮速环默认 `speed_kp=0.6, speed_ki=0`，避免叠加积分；减速、换向和制动都会清除旧积分。测速使用累计编码器的 80 ms 窗口，独立检查 10 ms 增量反馈是否断流。
 
@@ -40,7 +40,7 @@ python3 main.py --help
 
 仅电机测试可运行 `python3 -m debug.ball_motor_check --port /dev/ttyUSB0 --distance-mm 20`：只打开明确指定的电机串口，使用真实编码器构造模拟视觉目标；单次目标限制在 ±30 mm，累计移动保护 45 mm，超时 12 s，退出保留零速闭环。测试不连接摄像头、IMU 或机械臂，不能替代真实球识别和像素比例的验证。结果默认保存在 `/tmp/ball_motor_check.json`，可通过 `--output` 指定位置。
 
-动作均需在执行的任务段落中明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂 ID1–4 失能，夹爪保持；无需先校准，已建立的软件零点仍保留。后续位置指令会重新使能。`tasks.txt` 的主线回位后安排了该失能指令。
+动作均需在执行的任务段落中明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂 ID1–4 失能，夹爪保持；无需先校准，已建立的软件零点仍保留。后续位置指令会重新使能。`tasks.txt` 的 `[跑图]` 段回位后安排了该失能指令。
 
 运行依赖列在 `requirements.txt`，已验证 Python 3.12 和 Ultralytics 8.4.164。安装依赖时保留本机已匹配的 OpenCV、PyTorch、torchvision 和 CUDA 环境。
 
@@ -51,6 +51,10 @@ python3 main.py
 ```
 
 电机和 IMU 端口留空会自动识别；机械臂默认使用固定设备路径；夹爪留空会读取舵机并复用 `arm/servo_binding.json` 绑定。实机建议填写固定端口。两套 YOLO 推理默认使用 `cuda:0` 和 FP16，需要可用的 CUDA 环境。
+
+`calibrate-object-position` 无参数，用于后续物品区。复用后台 YOLO 的圆柱、圆锥、腰鼓检测，忽略小球；三个物品完整可见时按检测框中心横坐标排序，取中间那个对齐到同一帧原图宽度的一半。中间物品偏左后退、偏右前进，复用小球的编码器位置 PID、延迟补偿、制动和停稳确认；缺物品立即停车，中间物品形状变化、视觉或编码器断流、超时及取消均停止任务。返回结果中的 `shape` 是中间物品的形状。
+
+在 `tasks.txt` 对应任务段中，先安排物品区的机械臂观察姿态，再写 `calibrate-object-position`，校准成功后继续回位或抓取。无需先执行 `detect-balls`。任务表末尾保留了注释示例，观察姿态和执行位置由后续路线填写。`config.py` 的 `OBJECT_POSITION` 独立配置速度、容差、PID 和超时，初值沿用小球参数；`mm_per_px` 需按实际物品观察姿态、拍摄距离和分辨率重新标定。干跑打印参数，不连接设备。
 
 ## 修改入口
 
@@ -64,7 +68,8 @@ python3 main.py
 | `tasks/scan.py` | 抬头扫码与回位 |
 | `tasks/ball.py` | 小球观察与夹球动作 |
 | `tasks/detect_ball.py` | 按左、中、右打印 YOLO 小球颜色 |
-| `tasks/calibrate_ball_position.py`、`base/ball_position.py` | 小球校准任务入口与连续 PID 位置控制 |
+| `tasks/calibrate_ball_position.py`、`base/ball_position.py` | 小球校准任务入口与共用连续 PID 位置控制 |
+| `tasks/calibrate_object_position.py`、`base/object_position.py` | 物品校准任务入口与独立参数 |
 | `tasks/target.py`、`tasks/delivery.py` | 待填写的打靶、取放物体动作 |
 | `base/` | 底盘接口与运动控制；`feedback.py` 共用里程和测速，`control.py` 共用取消、等待、日志和清理 |
 | `arm/` | 机械臂会话、四轴控制、串口驱动与舵机绑定 |

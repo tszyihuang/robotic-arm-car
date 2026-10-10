@@ -59,6 +59,9 @@ BALL_POSITION = {
     "max_distance_m": 0.3, "timeout": 30.0,
 }
 
+# 物品校准独立调参，初值沿用小球；实际物品观察姿态下需重新标定 mm_per_px。
+OBJECT_POSITION = dict(BALL_POSITION)
+
 VISION_CONTROL = {
     "FRAME_W": 1280, "FRAME_H": 720, "LOOKAHEAD": 0.5, "FOV_DEG": 70.0,
     "E_TAU": 0.12, "E_GATE": 10.0,

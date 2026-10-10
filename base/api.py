@@ -3,7 +3,7 @@ import math
 import threading
 
 from .control import check_cancel, cleanup, wait_cancelable
-from . import straight_pid, arc_turn, calibrate_position, vision_align, vision_straight, ball_position
+from . import straight_pid, arc_turn, calibrate_position, vision_align, vision_straight, ball_position, object_position
 from config import BASE, SENSOR, ARM, POSITION, VISION
 
 
@@ -87,6 +87,13 @@ class Base:
     def calibrate_ball_position(self, vision, *, config=None, stop_event=None, log=print):
         self._connect()
         result = ball_position.calibrate_ball_position(
+            self.motor, vision, config=config, log=log,
+            stop_event=self.stop_event if stop_event is None else stop_event)
+        return self._require_success(result)
+
+    def calibrate_object_position(self, vision, *, config=None, stop_event=None, log=print):
+        self._connect()
+        result = object_position.calibrate_object_position(
             self.motor, vision, config=config, log=log,
             stop_event=self.stop_event if stop_event is None else stop_event)
         return self._require_success(result)

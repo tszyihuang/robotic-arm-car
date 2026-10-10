@@ -18,7 +18,7 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
         check_cancel(stop_event)
         if section == "主线" or any(step.command in (
                 "scan-qrcode", "detect-balls", "align", "vision-straight",
-                "calibrate-ball-position") for step in steps):
+                "calibrate-ball-position", "calibrate-object-position") for step in steps):
             vision.start()
         for index, step in enumerate(steps, 1):
             args = " ".join(f"{value:g}" for value in step.args)
