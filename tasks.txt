@@ -1,9 +1,45 @@
 [主线]
+straight 0.3
+arm-calibrate            # 扫码姿态前建立机械臂软件基准
+arm-move 6 0 160 1
+scan-qrcode    # 三位任务码：排爆物颜色、反恐靶颜色、救援目标形状
+home
+turn 87 0.38
+turn -45 0.52
+turn -42 0
+straight 0.7     #过减速带
+calibrate-position  #过减速带后校准
+turn 44 0.24
+turn 44 0
+vision-straight 0.47  #视觉校准1
+turn -87 0.36
+straight 0.27
+turn -87 0.36
+align                  #视觉校准2
+vision-straight 0.40
 arm-calibrate
-arm-move -90 0 102 91
-calibrate-object-position
+arm-move -90 55 74 89
+detect-balls
+calibrate-ball-position   #小球任务点校准
+小球任务                  # 第一位颜色匹配 detect-balls 的排列，调用对应抓球段
+
 home
 arm-disable
+vision-straight 1.76  #跑直线
+detect-targets        #识别标靶
+打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
+
+straight 0.13
+turn -87 0.43
+vision-straight 0.67
+arm-calibrate
+arm-move -90 0 102 91
+calibrate-object-position   #人质任务点校准
+人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
+
+home
+arm-disable
+vision-straight 1.55
 
 
 [抓中间的小球]
@@ -42,15 +78,20 @@ gripper-open
 gripper-close
 arm-home
 
-
 [打左边的靶]
-
+lock-target-left          # 左靶横纵误差均 ≤ 8px 连续 2 秒后完成
+gripper-open
+gripper-close
 
 [打中间的靶]
-
+lock-target-middle        # 中靶横纵误差均 ≤ 8px 连续 2 秒后完成
+gripper-open
+gripper-close
 
 [打右边的靶]
-
+lock-target-right         # 右靶横纵误差均 ≤ 8px 连续 2 秒后完成
+gripper-open
+gripper-close
 
 [抓左边的物体]
 arm-calibrate
@@ -78,46 +119,3 @@ arm-move -63 109 134 -83
 gripper-close
 arm-move -63 34 116 16
 arm-home
-
-
-
-[跑图]
-straight 0.3
-arm-move 6 0 160 1
-scan-qrcode           # 抬头扫码，结果返回 plan 节点的 qr_data
-home
-turn 87 0.38
-turn -45 0.52
-turn -42 0
-straight 0.7
-
-calibrate-position
-turn 44 0.24
-turn 44 0
-
-vision-straight 0.47
-turn -87 0.36
-straight 0.27
-turn -87 0.36
-align
-vision-straight 0.40
-
-
-arm-calibrate
-arm-move -90 55 74 89      #移动待机位置（观察顺序）
-
-detect-balls               #读取 YOLO 小球结果，打印左、中、右及颜色
-calibrate-ball-position
-
-home
-arm-disable
-
-
-vision-straight 1.76
-straight 0.13
-turn -87 0.43
-vision-straight 0.67
-vision-straight 1.55
-
-# 后续物品区：先列出机械臂观察姿态，确保圆柱、圆锥、腰鼓均在画面内，再执行：
-

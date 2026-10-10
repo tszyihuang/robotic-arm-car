@@ -169,7 +169,7 @@ class BallDetectionTests(unittest.TestCase):
             self.assertIn(name, message)
 
     def test_route_has_detection_and_dry_run_does_not_invent_results(self):
-        self.assertIn("detect-balls", [step.command for step in load_section(ROOT / "tasks.txt", "跑图")])
+        self.assertIn("detect-balls", [step.command for step in load_section(ROOT / "tasks.txt", "主线")])
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = execute(Step(1, "detect-balls", ()), None, None, DryVision())
         self.assertIsNone(result)

@@ -83,8 +83,8 @@ def validate_target(kind, value):
 def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
             min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None,
             candidate_source=None):
-    # 不指定颜色/形状时观察全部小球或物品的左右顺序。
-    layout_only = kind in ('ball', 'object') and value is None
+    # 不指定颜色/形状时观察三个候选的左右顺序。
+    layout_only = kind in ('ball', 'target', 'object') and value is None
     if not layout_only:
         validate_target(kind, value)
     # 不复用移动途中或上一个任务留下的画面。
@@ -125,6 +125,8 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
         try:
             if layout_only:
                 position, ordered = None, ordered_candidates(candidates)
+                if kind == 'target' and {row['value'] for row in ordered} != set(COLORS):
+                    raise ValueError('需要完整看见红、绿、蓝三个标靶，且每种颜色唯一')
             else:
                 position, ordered = choose_position(candidates, value)
         except ValueError as exc:

@@ -90,5 +90,9 @@ class DryVision:
         print("vision.observe_balls()  # 等待三个小球顺序连续稳定，打印左、中、右及颜色")
         return None
 
+    def observe_targets(self):
+        print("vision.observe_targets()  # 等待红、绿、蓝标靶顺序连续稳定，记录左、中、右及像素坐标")
+        return None
+
     def close(self):
         pass

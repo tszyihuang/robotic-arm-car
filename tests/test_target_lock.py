@@ -85,7 +85,7 @@ class TargetLockTests(unittest.TestCase):
                 self.assertGreater(result["rates"][4] * (y - 300), 0)
 
     def test_center_tolerance_resets_only_the_aligned_axis(self):
-        lock = TargetLock()
+        lock = TargetLock(config={"tolerance_px": 8})
         lock.step([target("red", 600, 400)], (1000, 600), 0.05)
         result = lock.step([target("red", 504, 390)], (1000, 600), 0.05)
         self.assertEqual(result["rates"][1], 0)
@@ -93,7 +93,7 @@ class TargetLockTests(unittest.TestCase):
         self.assertGreater(result["rates"][4], 0)
 
     def test_calibrated_aim_controls_directions_and_tolerance(self):
-        lock = TargetLock()
+        lock = TargetLock(config={"tolerance_px": 8})
         result = lock.step([target("red", 550, 250)], (1000, 600), 0.05, aim=(0.6, 0.3))
         self.assertAlmostEqual(result["errors"][1], -50)
         self.assertAlmostEqual(result["errors"][4], 70)
@@ -175,6 +175,97 @@ class TargetLockRunTests(unittest.TestCase):
 
         camera.next_frame.side_effect = next_frame
         return camera
+
+    def test_completion_includes_eight_pixel_boundary_and_requires_full_two_seconds(self):
+        camera = self.scripted_camera([(image(x=168, y=128), i, 0) for i in range(1, 6)])
+        result = run(camera, self.bus, config={"hz": 2}, complete_after=2, log=lambda _: None)
+        self.assertEqual(result, {"ok": True, "color": "red", "errors": {1: 8, 4: 8},
+                                  "stable_seconds": 2})
+        self.assertEqual(self.clock.now, 2)
+        self.assertEqual(camera.next_frame.call_count, 5)
+        self.assertTrue(self.bus.motors[2].enabled)
+        self.assertFalse(self.bus.closed)
+
+    def test_alignment_timer_resets_on_error_missing_duplicate_stale_future_and_timeout(self):
+        interruptions = ((image(x=169, y=120), 3, 0), (image(x=160, y=129), 3, 0),
+                         (image(None), 3, 0), (image(x=168, y=128), 2, 0),
+                         (image(x=168, y=128), 3, 0.8), (image(x=168, y=128), 3, -1),
+                         (TimeoutError(), 3, 0))
+        for interruption in interruptions:
+            with self.subTest(interruption=interruption[1:]):
+                self.clock.now = 0
+                aligned = image(x=168, y=128)
+                samples = [(aligned, 1, 0), (aligned, 2, 0), interruption]
+                samples += [(aligned, i, 0) for i in range(4, 9)]
+                camera = self.scripted_camera(samples)
+                result = run(camera, self.bus, config={"hz": 2}, complete_after=2, log=lambda _: None)
+                self.assertEqual(result["stable_seconds"], 2)
+                self.assertEqual(self.clock.now, 3.5)
+                self.assertEqual(camera.next_frame.call_count, 8)
+
+    def test_long_gap_between_fresh_frames_restarts_alignment_timer(self):
+        camera = Mock()
+        index = 0
+        last_capture = None
+
+        def next_frame(**kwargs):
+            nonlocal index, last_capture
+            index += 1
+            if index == 3:
+                self.clock.now += 1
+            elif last_capture is not None:
+                self.clock.now = max(self.clock.now, last_capture + 0.5)
+            last_capture = self.clock.now
+            return image(x=160, y=120), index, self.clock.wall()
+
+        camera.next_frame.side_effect = next_frame
+        result = run(camera, self.bus, config={"hz": 2}, complete_after=2, log=lambda _: None)
+        self.assertEqual(result["stable_seconds"], 2)
+        self.assertEqual(self.clock.now, 4)
+        self.assertEqual(index, 7)
+
+    def test_cached_frame_before_task_start_cannot_start_alignment_timer(self):
+        camera = Mock()
+        index = 0
+
+        def next_frame(**kwargs):
+            nonlocal index
+            index += 1
+            stamp = self.clock.wall() - (0.1 if index == 1 else 0)
+            return image(x=160, y=120), index, stamp
+
+        camera.next_frame.side_effect = next_frame
+        result = run(camera, self.bus, config={"hz": 20}, complete_after=2, log=lambda _: None)
+        self.assertGreaterEqual(self.clock.now, 2.05)
+        self.assertEqual(result["stable_seconds"], 2)
+
+    def test_aim_change_within_tolerance_restarts_alignment_timer(self):
+        camera, aim = Mock(), Mock()
+        aim.point.return_value = (0.5, 0.5)
+        index = 0
+
+        def next_frame(**kwargs):
+            nonlocal index
+            index += 1
+            if index == 3:
+                aim.point.return_value = (0.51, 0.5)
+            return image(x=160, y=120), index, self.clock.wall()
+
+        camera.next_frame.side_effect = next_frame
+        result = run(camera, self.bus, config={"hz": 2}, aim=aim, complete_after=2, log=lambda _: None)
+        self.assertEqual(result["stable_seconds"], 2)
+        self.assertEqual(self.clock.now, 3)
+        self.assertEqual(index, 7)
+
+    def test_one_axis_outside_tolerance_cannot_complete_before_timeout(self):
+        for x, y in ((169, 120), (160, 129)):
+            with self.subTest(x=x, y=y):
+                self.clock.now = 0
+                camera = self.scripted_camera([(image(x=x, y=y), i, 0) for i in range(1, 6)])
+                with self.assertRaisesRegex(TimeoutError, "锁靶超时"):
+                    run(camera, self.bus, config={"hz": 2}, duration=2.5,
+                        complete_after=2, log=lambda _: None)
+                self.assertEqual(camera.next_frame.call_count, 5)
 
     def test_real_color_detection_and_simulated_motors_converge_to_center(self):
         camera = Mock()

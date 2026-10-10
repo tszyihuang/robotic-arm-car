@@ -383,11 +383,11 @@ class ContinuousBallPositionTests(unittest.TestCase):
 
 
 class BallPositionTaskTests(unittest.TestCase):
-    def test_command_runs_before_home_and_dry_run_shows_pid_without_hardware(self):
-        commands = [step.command for step in load_section(ROOT / "tasks.txt", "跑图")]
+    def test_command_runs_before_mission_and_home_and_dry_run_shows_pid_without_hardware(self):
+        commands = [step.command for step in load_section(ROOT / "tasks.txt", "主线")]
         index = commands.index("calibrate-ball-position")
         self.assertEqual(commands[index - 1], "detect-balls")
-        self.assertEqual(commands[index + 1], "home")
+        self.assertEqual(commands[index + 1:index + 3], ["小球任务", "home"])
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = execute(Step(1, "calibrate-ball-position", ()), DryBase(), None, DryVision())
         self.assertIsNone(result)

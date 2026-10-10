@@ -21,6 +21,8 @@ from vision.targets import colored_targets
 
 TARGETS = ("middle", "left", "right", "red", "green", "blue")
 AXES = (1, 4)
+TASK_TOLERANCE_PX = 8.0
+TASK_STABLE_SECONDS = 2.0
 
 
 def validate_config(config=None):
@@ -128,8 +130,9 @@ class TargetLock:
         else:
             chosen = min(choices, key=distance)
         self.color, self.center = chosen["value"], center(chosen)
-        errors = {1: (self.center[0] - aim[0]) * width,
-                  4: (self.center[1] - aim[1]) * height}
+        x1, y1, x2, y2 = chosen["box"]
+        errors = {1: (x1 + x2) / 2 - aim[0] * width,
+                  4: (y1 + y2) / 2 - aim[1] * height}
         rates = {}
         for addr, half_size in ((1, width / 2), (4, height / 2)):
             if abs(errors[addr]) <= self.config["tolerance_px"]:
@@ -156,17 +159,23 @@ def hold(bus):
 
 
 def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=None, log=print,
-        aim=None, on_update=None):
-    """持续锁定直到取消或到达 duration；调用者负责关闭摄像头和总线。"""
+        aim=None, on_update=None, complete_after=0.0, complete_tolerance_px=TASK_TOLERANCE_PX):
+    """锁靶；可按连续到位时间完成，调用者负责关闭摄像头和总线。"""
     controller = TargetLock(target, config)
     cfg = controller.config
     duration = finite(duration, "运行时长")
     if duration < 0:
         raise ValueError("运行时长必须为非负数，0 表示持续运行")
+    complete_after = finite(complete_after, "到位保持时间")
+    complete_tolerance_px = finite(complete_tolerance_px, "完成误差容差")
+    if complete_after < 0 or complete_tolerance_px < 0:
+        raise ValueError("到位保持时间和完成误差容差必须为非负数")
     period = 1 / cfg["hz"]
     start = time.monotonic()
+    capture_start = time.time()
     index, previous_stamp, moving = 0, None, False
     previous_state, next_log = None, start
+    aligned_since = aligned_stamp = aligned_aim = None
     try:
         check_cancel(stop_event)
         # 位置命令使能电机并持续保持目标；缺靶和退出时仍保留 ID2 的固定位置。
@@ -235,9 +244,76 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
             if status != previous_state or now >= next_log:
                 log(state)
                 previous_state, next_log = status, now + 0.5
+            if complete_after:
+                in_band = (result is not None
+                           and all(abs(error) <= complete_tolerance_px for error in result["errors"].values())
+                           and stamp >= capture_start
+                           and -0.1 <= time.time() - stamp < VISION["frame_stale"]
+                           and (aim is None or aim.point() == controller.aim))
+                if in_band:
+                    # 用新帧采集时间确认连续到位；长时间无新帧或瞄准点变化均重新计时。
+                    if (aligned_since is None or aligned_aim != controller.aim
+                            or not 0 < stamp - aligned_stamp < VISION["frame_stale"]):
+                        aligned_since = stamp
+                    aligned_stamp, aligned_aim = stamp, controller.aim
+                    stable_seconds = stamp - aligned_since
+                    if stable_seconds >= complete_after:
+                        check_cancel(stop_event)
+                        log(f"锁靶完成：{controller.color}，横纵误差均 ≤ {complete_tolerance_px:g}px，"
+                            f"连续保持 {stable_seconds:.2f}s")
+                        return {"ok": True, "color": controller.color,
+                                "errors": dict(result["errors"]), "stable_seconds": stable_seconds}
+                else:
+                    aligned_since = aligned_stamp = aligned_aim = None
             wait_cancelable(max(0.0, period - (time.monotonic() - tick)), stop_event)
+        if complete_after:
+            raise TimeoutError(f"锁靶超时：未在 {duration:g}s 内达到横纵误差均 ≤ "
+                               f"{complete_tolerance_px:g}px 并连续保持 {complete_after:g}s")
     finally:
         hold(bus)
+
+
+def run_task(arm, vision, target="middle", *, config=None, duration=0.0,
+             stop_event=None, log=print, aim_file=DEFAULT_AIM_FILE):
+    """任务表入口：复用机械臂和视觉会话，退出只关闭本次校正网页。"""
+    if target not in TARGETS:
+        raise ValueError(f"目标必须为 {', '.join(TARGETS)}")
+    cfg = validate_config(config)
+    duration = finite(duration, "运行时长")
+    if duration < 0:
+        raise ValueError("锁靶超时必须为非负数，0 表示不限时")
+    stop_event = stop_event if stop_event is not None else getattr(arm, "stop_event", None)
+    check_cancel(stop_event)
+    if getattr(arm, "dry_run", False):
+        end = (f"横纵误差均 ≤ {TASK_TOLERANCE_PX:g}px 连续保持 {TASK_STABLE_SECONDS:g} 秒后完成，"
+               "继续下一条指令")
+        if duration:
+            end += f"；超时 {duration:g} 秒则停止任务"
+        log(f"lock_target.run(target={target!r})  # {end}；"
+            f"ID2 保持 {cfg['motor2_angle_deg']:g}°，ID1/ID4 PID 跟踪，开启校正网页")
+        return None
+
+    web = bus = None
+    try:
+        aim = AimPoint(aim_file)
+        web = TargetLockWeb(aim)
+        check_cancel(stop_event)
+        camera = vision.start_camera()
+        bus = arm._ensure_bus()
+        check_cancel(stop_event)
+        web.start(camera)
+        log(f"锁靶选择：{target}；ID2 保持 {cfg['motor2_angle_deg']:g}°；"
+            f"瞄准点矫正网页：http://127.0.0.1:{web.port}")
+        return run(camera, bus, target, config=cfg, duration=duration,
+                   stop_event=stop_event, aim=aim, on_update=web.update, log=log,
+                   complete_after=TASK_STABLE_SECONDS, complete_tolerance_px=TASK_TOLERANCE_PX)
+    except (KeyboardInterrupt, MotionCancelled):
+        if bus is not None:
+            cleanup(("锁靶取消，机械臂 ID1–4 失能", bus.disable_all), raise_errors=False)
+        raise
+    finally:
+        if web is not None:
+            cleanup(("瞄准点矫正网页关闭", web.close), raise_errors=False)
 
 
 def main(args=None):

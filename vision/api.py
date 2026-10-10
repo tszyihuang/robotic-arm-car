@@ -127,6 +127,17 @@ class Vision:
         return [{"position": position, "color": row["value"]}
                 for position, row in zip(("left", "middle", "right"), result["candidates"])]
 
+    def observe_targets(self):
+        """读取后台彩色标靶结果，返回稳定的左右顺序和原图像素坐标。"""
+        result = self._observe("target", None)
+        targets = []
+        for position, row in zip(("left", "middle", "right"), result["candidates"]):
+            x1, y1, x2, y2 = row["box"]
+            targets.append({"position": position, "color": row["value"],
+                            "box": list(row["box"]), "center_x": (x1 + x2) / 2,
+                            "center_y": (y1 + y2) / 2})
+        return targets
+
     def observe_ball_layout(self, *, timeout=None):
         """读取调用后新帧的三个球坐标及同一原图尺寸，供位置校准使用。"""
         return self._observe("ball", None, timeout=timeout, stable_frames=1, include_size=True)

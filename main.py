@@ -1,11 +1,12 @@
-"""按 tasks.txt 的选定段落顺序执行比赛动作。"""
+"""按任务表顺序行驶，在任务点结合扫码及现场排列调用对应动作段。"""
 import argparse
 import faulthandler
 import signal
 import threading
 from pathlib import Path
 
-from tasks.runner import load_main, load_section, list_sections, execute
+from tasks.runner import load_main, load_section, load_branches, list_sections, execute
+from tasks.mission import MissionState, TASK_SECTIONS
 from base.control import check_cancel, cleanup, MotionCancelled
 
 TASKS_FILE = Path(__file__).resolve().with_name("tasks.txt")
@@ -15,15 +16,37 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
     try:
         path = TASKS_FILE if tasks_path is None else tasks_path
         steps = load_main(path) if section == "主线" else load_section(path, section)
+        branches = load_branches(path, steps, section=section)
+        mission = MissionState()
         check_cancel(stop_event)
         if section == "主线" or any(step.command in (
-                "scan-qrcode", "detect-balls", "align", "vision-straight",
-                "calibrate-ball-position", "calibrate-object-position") for step in steps):
+                "scan-qrcode", "detect-balls", "detect-targets", "align", "vision-straight",
+                "calibrate-ball-position", "calibrate-object-position", *TASK_SECTIONS)
+                for plan in (steps, *branches.values()) for step in plan):
             vision.start()
-        for index, step in enumerate(steps, 1):
-            args = " ".join(f"{value:g}" for value in step.args)
-            print(f"[{section} {index}/{len(steps)}] {step.command} {args}".rstrip(), flush=True)
-            execute(step, base, arm, vision, stop_event=stop_event)
+
+        def run_steps(current_steps, current_section, *, called=False, target_color=None):
+            for index, step in enumerate(current_steps, 1):
+                check_cancel(stop_event)
+                args = " ".join(f"{value:g}" for value in step.args)
+                print(f"[{current_section} {index}/{len(current_steps)}] {step.command} {args}".rstrip(), flush=True)
+                if called and step.command == "arm-calibrate" and getattr(arm, "calibrated", False) is True:
+                    print("  机械臂沿用主线已建立的软件基准。", flush=True)
+                    continue
+                if step.command in TASK_SECTIONS:
+                    selected = mission.select_section(step.command, vision, stop_event=stop_event)
+                    color = mission.goals["target"] if step.command == "打靶任务" else target_color
+                    if selected is None:
+                        for name in TASK_SECTIONS[step.command].values():
+                            print(f"  [条件分支预览：{name}；实机按现场排列选择一段]", flush=True)
+                            run_steps(branches[name], name, called=True, target_color=color)
+                    else:
+                        run_steps(branches[selected], selected, called=True, target_color=color)
+                else:
+                    result = execute(step, base, arm, vision, stop_event=stop_event, target_color=target_color)
+                    mission.record(step.command, result)
+
+        run_steps(steps, section)
     finally:
         # 底盘保持零速度闭环，机械臂保留最后目标；关闭连接时不释放电机。
         cleanup(("底盘停车", base.stop),

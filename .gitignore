@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 screenshots/
 tasks/target_lock_aim.json
+tasks/target_positions.json

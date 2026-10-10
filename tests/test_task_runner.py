@@ -54,7 +54,14 @@ class TaskParserTests(unittest.TestCase):
 
     def test_invalid_command_arity_and_nonfinite_numbers_report_line(self):
         for command in ("未知 1", "straight", "align 1", "turn 44 0.24 150",
-                        "arm-move 0 0 160", "arm-disable 1", "calibrate-ball-position 1",
+                        "arm-move 0 0 160", "arm-disable 1", "calibrate-ball-position 1", "detect-targets 1",
+                        "lock-target-left -1", "lock-target-middle 1 2", "lock-target-right nan",
+                        "小球任务 1", "打靶任务 2", "人质任务 3",
                         "straight nan", "turn inf", "turn 错误"):
             with self.subTest(command=command), self.assertRaisesRegex(ValueError, "tasks.txt:3"):
                 self.parse(f"[主线]\nstraight 0.48\n{command}\n")
+
+    def test_mission_directives_are_parsed_without_arguments(self):
+        steps = self.parse("[主线]\n小球任务 # 按颜色选择\n打靶任务\n人质任务\n")
+        self.assertEqual([(step.command, step.args) for step in steps],
+                         [("小球任务", ()), ("打靶任务", ()), ("人质任务", ())])

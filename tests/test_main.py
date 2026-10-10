@@ -301,7 +301,11 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         steps = main.load_main(ROOT / "tasks.txt")
         for index, step in enumerate(steps, 1):
             self.assertIn(f"[主线 {index}/{len(steps)}] {step.command}", result.stdout)
-        self.assertNotIn("条件分支预览", result.stdout)
+        self.assertIn("任务目标：排爆物=绿色，反恐靶=红色，救援目标=圆柱形", result.stdout)
+        for name in ("抓左边的小球", "抓中间的小球", "抓右边的小球",
+                     "打左边的靶", "打中间的靶", "打右边的靶",
+                     "抓左边的物体", "抓中间的物体", "抓右边的物体"):
+            self.assertIn(f"条件分支预览：{name}", result.stdout)
 
     def test_actual_sigint_cancels_main_and_closes_all_devices(self):
         script = '''
@@ -332,6 +336,7 @@ with patch('base.api.Base', return_value=base), patch('arm.api.Arm', return_valu
                 arm = Arm(simulate=True)
                 arm.dry_run = True
                 base, vision = Mock(), Mock()
+                vision.scan_qrcode.return_value = "211"
                 vision.scan_qrcode.side_effect = error
                 buses = []
                 calibrate = arm.calibrate
