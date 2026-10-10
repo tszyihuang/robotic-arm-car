@@ -67,8 +67,8 @@ VISION_CONTROL = {
     "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,
-    "KP_YAW": 10.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
-    "KP_RATE": 10.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
+    "KP_YAW": 7.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
+    "KP_RATE": 7.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
     "GAP_FINISH_MM": 300.0,  # 视觉直走最后这段距离用 gap 保持切换时航向。
 }
@@ -111,7 +111,7 @@ VISION = {
     "width": 1280, "height": 720, "scan_width": 1920, "scan_height": 1080,
     "frame_stale": 0.6, "screenshot_dir": ROOT / "screenshots",
     "scan_timeout": 30.0, "observe_timeout": 10.0,
-    "observe_stable_frames": 3, "target_min_area_ratio": 0.001,
+    "observe_stable_frames": 3,
     "model_wait": 60.0,
     "boundary_weights": ROOT / "vision/models/boundary/weights.pt",
     "boundary_args": ROOT / "vision/models/boundary/args.yaml",
@@ -121,11 +121,12 @@ VISION = {
 
 TARGET_LOCK = {
     "motor2_angle_deg": 12.0,  # 跟踪期间由电机位置环保持的多圈编码器角度。
+    # 瞄准前连续确认三色标靶；中心相对本轮首帧的漂移按画面宽、高归一化。
+    "stable_frames": 3, "stable_distance_ratio": 0.03,
     # 两轴各自使用 PID；误差除以对应画面半宽/半高，输出为 °/s。
     "kp": 100.0, "ki": 0, "kd": 0, "derivative_tau": 0,
     "hz": 100.0, "tolerance_px": 0.0,
     "max_rate_deg_s": 150.0, "max_step_deg": 10.0,
     # 同色候选按前一帧的位置匹配，距离以画面宽、高归一化。
     "match_distance_ratio": 0.25,
-    "min_area_ratio": VISION["target_min_area_ratio"],
 }

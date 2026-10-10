@@ -8,6 +8,9 @@ from .qrcode import COLORS, SHAPES
 
 LABELS = {"红球": ("ball", "red"), "绿球": ("ball", "green"), "蓝球": ("ball", "blue"),
           "red ball": ("ball", "red"), "green ball": ("ball", "green"), "blue ball": ("ball", "blue"),
+          "red target": ("target", "red"), "green target": ("target", "green"),
+          "blue target": ("target", "blue"),
+          "红靶": ("target", "red"), "绿靶": ("target", "green"), "蓝靶": ("target", "blue"),
           "圆柱": ("object", "cylinder"), "圆柱形": ("object", "cylinder"),
           "圆锥": ("object", "cone"), "圆锥形": ("object", "cone"),
           "腰鼓": ("object", "drum"), "腰鼓形": ("object", "drum"),
@@ -27,32 +30,6 @@ def candidates_from_detections(detections, kind):
             continue
         candidates.append({'value': label[1], 'name': detection['name'],
                            'box': box, 'center_x': (box[0] + box[2]) / 2})
-    return candidates
-
-
-def colored_targets(frame, min_area_ratio=VISION["target_min_area_ratio"]):
-    """现有 YOLO 未训练靶类别；以 HSV 色块轮廓识别三块彩色靶。"""
-    import cv2
-    import numpy as np
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    ranges = {'red': [((0, 70, 50), (10, 255, 255)), ((170, 70, 50), (179, 255, 255))],
-              'green': [((35, 70, 50), (85, 255, 255))],
-              'blue': [((90, 70, 50), (135, 255, 255))]}
-    candidates = []
-    height, width = frame.shape[:2]
-    for color, bounds in ranges.items():
-        mask = np.zeros((height, width), dtype=np.uint8)
-        for lower, upper in bounds:
-            mask |= cv2.inRange(hsv, np.array(lower), np.array(upper))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
-            if cv2.contourArea(contour) < height * width * min_area_ratio:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            candidates.append({'value': color, 'name': color, 'box': [x, y, x + w, y + h],
-                               'center_x': x + w / 2})
     return candidates
 
 
@@ -81,12 +58,13 @@ def validate_target(kind, value):
 
 
 def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
-            min_area_ratio=VISION["target_min_area_ratio"], stop_event=None, predict_lock=None,
-            candidate_source=None):
+            stop_event=None, predict_lock=None, candidate_source=None):
     # 不指定颜色/形状时观察三个候选的左右顺序。
     layout_only = kind in ('ball', 'target', 'object') and value is None
     if not layout_only:
         validate_target(kind, value)
+    if candidate_source is None and predictor is None:
+        raise ValueError("目标观察需要 YOLO 预测器或后台 YOLO 结果源")
     # 不复用移动途中或上一个任务留下的画面。
     with camera.condition:
         index = camera.index
@@ -107,17 +85,14 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
         else:
             frame, index, stamp = camera.next_frame(after=index, timeout=min(3.0, remaining), stop_event=stop_event)
             size = None
-            if kind == 'target':
-                candidates = colored_targets(frame, min_area_ratio)
+            if predict_lock is None:
+                info = predictor.predict(frame)
             else:
-                if predict_lock is None:
+                with predict_lock:
+                    check_cancel(stop_event)
                     info = predictor.predict(frame)
-                else:
-                    with predict_lock:
-                        check_cancel(stop_event)
-                        info = predictor.predict(frame)
-                candidates = candidates_from_detections(info['detections'], kind)
-                size = info.get('size')
+            candidates = candidates_from_detections(info['detections'], kind)
+            size = info.get('size')
         check_cancel(stop_event)
         if time.time() - stamp > VISION["frame_stale"]:
             previous, count, reason = None, 0, '推理结果对应画面已过期'

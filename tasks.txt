@@ -11,12 +11,11 @@ straight 0.7     #过减速带
 calibrate-position  #过减速带后校准
 turn 44 0.24
 turn 44 0
-vision-straight 0.47  #视觉校准1
+straight 0.50  #视觉校准1
 turn -87 0.36
-straight 0.27
+straight 0.30
 turn -87 0.36
-align                  #视觉校准2
-vision-straight 0.40
+vision-straight 0.35
 arm-calibrate
 arm-move -90 55 74 89
 detect-balls
@@ -26,6 +25,8 @@ calibrate-ball-position   #小球任务点校准
 home
 arm-disable
 vision-straight 1.76  #跑直线
+
+arm-move -90 0 160 4
 detect-targets        #识别标靶
 打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
 
@@ -45,11 +46,11 @@ vision-straight 1.55
 [抓中间的小球]
 arm-calibrate
 gripper-open
-arm-move -98 37 110 62
-arm-move -98 119 105.4 2.3
+arm-move -95 37 110 62
+arm-move -95 130 140 -88
 gripper-close
-arm-move -90 37 110 62
-arm-move 90.8 100 152.5 -81.5
+arm-move -95 37 110 62
+arm-move 93 100 152.5 -81.5
 gripper-open
 gripper-close
 arm-home
@@ -58,10 +59,10 @@ arm-home
 arm-calibrate
 gripper-open
 arm-move -128 37 110 62
-arm-move -128 136 73 19.5
+arm-move -128 140 118 -81.6
 gripper-close
 arm-move -128 37 110 62
-arm-move 90.8 100 152.5 -81.5
+arm-move 93 100 152.5 -81.5
 gripper-open
 gripper-close
 arm-home
@@ -69,11 +70,11 @@ arm-home
 [抓右边的小球]
 arm-calibrate
 gripper-open
-arm-move -63 37 110 62
-arm-move -63 136 73 19.5
+arm-move -60 37 110 62
+arm-move -60 133 128 -81
 gripper-close
-arm-move -63 37 110 62
-arm-move 90.8 100 152.5 -81.5
+arm-move -60 37 110 62
+arm-move 93 100 152.5 -81.5
 gripper-open
 gripper-close
 arm-home
@@ -119,3 +120,13 @@ arm-move -63 109 134 -83
 gripper-close
 arm-move -63 34 116 16
 arm-home
+
+
+[1]
+arm-calibrate
+arm-move -90 55 74 89
+detect-balls
+calibrate-ball-position   #小球任务点校准
+
+home
+arm-disable

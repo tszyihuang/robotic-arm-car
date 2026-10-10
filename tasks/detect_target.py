@@ -1,4 +1,4 @@
-"""识别前方三个彩色标靶，记录左右顺序及画面坐标。"""
+"""读取项目 YOLO 的三色标靶结果，记录左右顺序及画面坐标。"""
 import json
 from pathlib import Path
 import tempfile

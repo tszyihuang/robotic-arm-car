@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import main
@@ -17,7 +18,7 @@ from tasks import detect_target
 from tasks.runner import Step, execute, load_section
 from tests.test_vision_api import ContinuousCamera
 from vision.api import Vision
-from vision.targets import colored_targets, observe
+from vision.targets import observe
 
 
 def candidates(colors):
@@ -25,6 +26,12 @@ def candidates(colors):
                            "box": [i * 100, 10, i * 100 + 40, 50],
                            "center_x": i * 100 + 20}
                           for i, color in enumerate(colors)]))
+
+
+def yolo_targets(colors=("green", "red", "blue")):
+    return {"size": [600, 240], "detections": [
+        {"name": color + "_target", "confidence": 0.9,
+         "box": [i * 200 + 30, 60, i * 200 + 150, 180]} for i, color in enumerate(colors)]}
 
 
 class TargetDetectionTests(unittest.TestCase):
@@ -52,15 +59,19 @@ class TargetDetectionTests(unittest.TestCase):
         base, arm = Mock(), Mock()
         threads = []
 
-        def detect(frame, min_area_ratio):
+        def detect(frame):
             threads.append(threading.current_thread().name)
-            return colored_targets(frame, min_area_ratio)
+            return yolo_targets()
+
+        predictor = Mock()
+        predictor.predict.side_effect = detect
+        factory = Mock(return_value=predictor)
 
         try:
             with tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / "target_positions.json"
                 with patch("vision.api.CameraStream", return_value=camera), \
-                        patch("vision.api.colored_targets", side_effect=detect), \
+                        patch.dict("sys.modules", {"vision.yolo_objects": SimpleNamespace(ObjectPredictor=factory)}), \
                         patch("tasks.detect_target.DEFAULT_POSITIONS_FILE", path), \
                         patch("tasks.runner.pause"), contextlib.redirect_stdout(io.StringIO()) as output:
                     result = execute(Step(1, "detect-targets", ()), base, arm, vision)
@@ -74,29 +85,31 @@ class TargetDetectionTests(unittest.TestCase):
                                  "标靶位置：右，颜色：蓝色", "标靶位置已记录"):
                     self.assertIn(expected, output.getvalue())
                 self.assertEqual(set(threads), {"vision-inference"})
-                self.assertIsNone(vision._object_model)
+                self.assertIs(vision._object_model, predictor)
+                factory.assert_called_once()
                 self.assertIsNone(vision._boundary_model)
-                self.assertFalse(vision._target_requested.is_set())
                 self.assertEqual(base.mock_calls, [])
                 self.assertEqual(arm.mock_calls, [])
         finally:
             vision.close()
 
-    def test_missing_targets_timeout_preserves_record_and_stops_detection_request(self):
+    def test_missing_yolo_targets_timeout_preserves_record(self):
         camera, vision = ContinuousCamera(), Vision()
-        camera.frame[60:180, 430:550] = 0
+        predictor = Mock()
+        predictor.predict.return_value = yolo_targets(("green", "red"))
         vision.config["observe_timeout"] = 0.1
         try:
             with tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / "target_positions.json"
                 path.write_text("previous record", encoding="utf-8")
                 with patch("vision.api.CameraStream", return_value=camera), \
+                        patch.dict("sys.modules", {"vision.yolo_objects": SimpleNamespace(
+                            ObjectPredictor=Mock(return_value=predictor))}), \
                         contextlib.redirect_stdout(io.StringIO()) as output:
                     with self.assertRaisesRegex(TimeoutError, "当前识别到 2 个"):
                         detect_target.run(vision, output_path=path)
                 self.assertEqual(path.read_text(), "previous record")
                 self.assertEqual(output.getvalue(), "")
-                self.assertFalse(vision._target_requested.is_set())
         finally:
             vision.close()
 

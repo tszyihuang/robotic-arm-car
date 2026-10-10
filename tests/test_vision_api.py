@@ -47,7 +47,8 @@ class VisionApiTests(unittest.TestCase):
         boundary_started, release_boundary, delivered = [threading.Event() for _ in range(3)]
         objects = {'size': [600, 240], 'detections': [
             {'name': name, 'box': [x - 20, 10, x + 20, 50]}
-            for name, x in (('红球', 150), ('绿球', 300), ('蓝球', 450))]}
+            for name, x in (('红球', 150), ('绿球', 300), ('蓝球', 450),
+                            ('red_target', 100), ('green_target', 300), ('blue_target', 500))]}
         geometry = {'size': [600, 240], 'left': {'a': -0.3, 'b': 200},
                     'right': {'a': 0.3, 'b': 400}, 'timing_ms': {'total': 1}}
         results = []
@@ -81,6 +82,10 @@ class VisionApiTests(unittest.TestCase):
                 self.assertEqual(results[0]['frame_index'], 1)
                 self.assertEqual([ball['center_x'] for ball in results[0]['candidates']], [150, 300, 450])
                 self.assertEqual(vision.ball_layout_sample()['frame_index'], 1)
+                targets = vision.wait_target_layout(after=0, timeout=0)
+                self.assertEqual([row['value'] for row in targets['candidates']], ['red', 'green', 'blue'])
+                self.assertEqual(targets['size'], [600, 240])
+                self.assertEqual(targets['frame_index'], 1)
                 self.assertIsNone(vision._preview, '网页画面仍需匹配同一帧的所有结果')
         finally:
             release_boundary.set()
@@ -176,24 +181,30 @@ class VisionApiTests(unittest.TestCase):
             vision.close()
         self.assertFalse(worker.is_alive())
 
-    def test_color_target_detection_runs_in_background_without_loading_yolo(self):
+    def test_targets_reuse_one_background_yolo_model_and_its_detection_boxes(self):
         camera, vision = ContinuousCamera(), Vision()
-        from vision.targets import colored_targets
         threads = []
 
-        def detect(frame, min_area_ratio):
+        def detect(frame):
             threads.append(threading.current_thread().name)
-            return colored_targets(frame, min_area_ratio)
+            return {'size': [600, 240], 'detections': [
+                {'name': name, 'box': [x - 20, 60, x + 20, 180]}
+                for name, x in (('green_target', 90), ('red_target', 290), ('blue_target', 490),
+                                ('红球', 100), ('圆柱', 500))]}
+
+        predictor = Mock()
+        predictor.predict.side_effect = detect
+        factory = Mock(return_value=predictor)
 
         try:
             with patch('vision.api.CameraStream', return_value=camera), \
-                    patch('vision.api.colored_targets', side_effect=detect):
+                    patch.dict('sys.modules', {'vision.yolo_objects': SimpleNamespace(ObjectPredictor=factory)}):
                 self.assertEqual(vision.observe_target('target', 'red'), 'middle')
                 self.assertEqual(vision.observe_target('target', 'blue'), 'right')
                 self.assertEqual(set(threads), {'vision-inference'})
                 self.assertIsNone(vision._boundary_model)
-                self.assertIsNone(vision._object_model)
-                self.assertFalse(vision._target_requested.is_set())
+                self.assertIs(vision._object_model, predictor)
+                factory.assert_called_once()
         finally:
             vision.close()
 

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from arm.api import Arm as ArmSession
 from base.control import MotionCancelled
 from vision.qrcode import mission_code
-from vision.targets import candidates_from_detections, choose_position, colored_targets, observe
+from vision.targets import candidates_from_detections, choose_position, observe
 
 
 def balls(names=('红球', '绿球', '蓝球')):
@@ -48,15 +48,13 @@ class TargetTests(unittest.TestCase):
             with self.subTest(names=names), self.assertRaises(ValueError):
                 choose_position(candidates_from_detections(balls(names), 'ball'), value)
 
-    def test_colored_targets_use_real_opencv_contours(self):
-        import numpy as np
-        frame = np.zeros((240, 600, 3), dtype=np.uint8)
-        frame[60:180, 30:150] = (0, 255, 0)
-        frame[60:180, 230:350] = (0, 0, 255)
-        frame[60:180, 430:550] = (255, 0, 0)
-        position, candidates = choose_position(colored_targets(frame), 'red')
+    def test_target_classes_use_yolo_boxes_and_ignore_balls_and_objects(self):
+        detections = balls(('green_target', 'red_target', 'blue_target')) + balls() \
+            + [{'name': '圆柱', 'box': [1, 1, 3, 3]}]
+        position, candidates = choose_position(candidates_from_detections(detections, 'target'), 'red')
         self.assertEqual(position, 1)
         self.assertEqual([c['value'] for c in candidates], ['green', 'red', 'blue'])
+        self.assertEqual([c['name'] for c in candidates], ['green_target', 'red_target', 'blue_target'])
 
     def test_observation_requires_new_and_stable_frames(self):
         camera = Mock(condition=threading.Condition(), index=10)

@@ -15,14 +15,14 @@ from base.control import MotionCancelled
 from config import ROOT
 from tasks.lock_target import run_task
 from tasks.runner import load_section
-from tests.test_target_lock import Clock, image
+from tests.test_target_lock import Clock, image, scene, target_sample
 
 
 SECTIONS = (("打左边的靶", "left"), ("打中间的靶", "middle"), ("打右边的靶", "right"))
 
 
 class TargetLockTaskTests(unittest.TestCase):
-    def test_three_sections_reuse_shared_devices_and_saved_aim_without_loading_yolo(self):
+    def test_three_sections_reuse_shared_devices_saved_aim_and_background_yolo(self):
         for section, target in SECTIONS:
             with self.subTest(section=section):
                 arm = Arm(simulate=True)
@@ -41,6 +41,8 @@ class TargetLockTaskTests(unittest.TestCase):
                 self.assertEqual(control.call_args.kwargs["complete_tolerance_px"], 8)
                 self.assertIs(control.call_args.kwargs["aim"], aim)
                 self.assertEqual(control.call_args.kwargs["on_update"], web.update)
+                self.assertEqual(control.call_args.kwargs["candidate_source"], vision.wait_target_layout)
+                vision.enable_objects.assert_called_once()
                 web.start.assert_called_once_with(camera)
                 web.close.assert_called_once()
                 vision.start.assert_not_called()
@@ -58,8 +60,8 @@ class TargetLockTaskTests(unittest.TestCase):
                 self.addCleanup(arm.close)
                 bus = arm._ensure_bus()
                 frame = image(x=40)
-                frame[100:120, 170:190] = (0, 255, 0)
-                frame[160:180, 260:280] = (255, 0, 0)
+                frame.detections.extend(image("green", 180, 110).detections
+                                        + image("blue", 270, 170).detections)
                 for motor in bus.motors.values():
                     motor.move = Mock(wraps=motor.move)
                 index = 0
@@ -68,10 +70,10 @@ class TargetLockTaskTests(unittest.TestCase):
                 def next_frame(**kwargs):
                     nonlocal index
                     index += 1
-                    return frame, index, clock.wall()
+                    return target_sample(frame, index, clock.wall())
 
-                camera.next_frame.side_effect = next_frame
                 vision, web, aim = Mock(), Mock(port=8080), Mock()
+                vision.wait_target_layout.side_effect = next_frame
                 vision.start_camera.return_value = camera
                 aim.point.return_value = (0.5, 0.5)
                 with patch("tasks.lock_target.time.monotonic", clock.monotonic), \
@@ -99,14 +101,15 @@ class TargetLockTaskTests(unittest.TestCase):
         vision.start_camera.return_value = camera
         aim.point.return_value = (0.5, 0.5)
         frame = image(x=168, y=128)  # 两轴误差恰好为 8px，同样允许完成。
+        frame.detections.extend(image("green", 220, 110).detections + image("blue", 280, 110).detections)
         index = 0
 
         def next_frame(**kwargs):
             nonlocal index
             index += 1
-            return frame, index, clock.wall()
+            return target_sample(frame, index, clock.wall())
 
-        camera.next_frame.side_effect = next_frame
+        vision.wait_target_layout.side_effect = next_frame
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "tasks.txt"
             path.write_text("[打靶测试]\nlock-target-left\narm-disable\n", encoding="utf-8")
@@ -119,8 +122,8 @@ class TargetLockTaskTests(unittest.TestCase):
                     patch("tasks.runner.pause"), patch.object(arm, "disable", wraps=arm.disable) as disable, \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 main.run(Mock(), arm, vision, section="打靶测试", tasks_path=path)
-        self.assertEqual(clock.now, 2)
-        self.assertEqual(index, 5)
+        self.assertEqual(clock.now, 3)
+        self.assertEqual(index, 7)
         disable.assert_called_once()
         self.assertIn("锁靶完成", output.getvalue())
         self.assertIn("[打靶测试 2/2] arm-disable", output.getvalue())
@@ -145,6 +148,45 @@ class TargetLockTaskTests(unittest.TestCase):
                 self.assertTrue(all(not motor.enabled for motor in bus.motors.values()))
                 self.assertFalse(bus.closed)
                 web.close.assert_called_once()
+
+    def test_lost_task_reuses_calibration_restores_pose_and_does_not_execute_next_step(self):
+        clock, arm = Clock(), Arm(simulate=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            arm.calibrate()
+            arm.move_joints(-90, 0, 160, 4)
+        controller, bus = arm._arm, arm._ensure_bus()
+        zero = dict(controller.encoder_zero_deg)
+        vision, camera, web, aim = Mock(), Mock(), Mock(port=8080), Mock()
+        vision.start_camera.return_value = camera
+        aim.point.return_value = (0.5, 0.5)
+        index = 0
+
+        def next_frame(**kwargs):
+            nonlocal index
+            index += 1
+            return target_sample(scene() if index <= 3 else image(None), index, clock.wall())
+
+        vision.wait_target_layout.side_effect = next_frame
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tasks.txt"
+            path.write_text("[丢靶测试]\nlock-target-middle 0.08\ngripper-open\n", encoding="utf-8")
+            with patch("tasks.lock_target.time.monotonic", clock.monotonic), \
+                    patch("tasks.lock_target.time.time", clock.wall), \
+                    patch("tasks.lock_target.wait_cancelable", clock.wait), \
+                    patch("tasks.lock_target.TargetLockWeb", return_value=web), \
+                    patch("tasks.lock_target.AimPoint", return_value=aim), \
+                    patch.object(arm, "calibrate") as calibrate, \
+                    patch.object(arm, "open_gripper") as gripper, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(TimeoutError, "锁靶超时"):
+                    main.run(Mock(), arm, vision, section="丢靶测试", tasks_path=path)
+        calibrate.assert_not_called()
+        gripper.assert_not_called()
+        self.assertEqual(controller.encoder_zero_deg, zero)
+        self.assertEqual({addr: motor.angle for addr, motor in bus.motors.items()},
+                         {1: -90, 2: 0, 3: 0, 4: -20})
+        self.assertTrue(bus.closed)
+        web.close.assert_called_once()
 
     def test_precancel_and_web_failure_do_not_open_devices(self):
         arm, vision = Arm(simulate=True), Mock()
