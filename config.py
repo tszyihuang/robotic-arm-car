@@ -68,7 +68,7 @@ VISION_CONTROL = {
     "FRAME_W": 1280, "FRAME_H": 720,
     "LOOKAHEAD": 0.7,  # 前视行占画面高度的比例，同时修正航向与横向偏移。
     "LANE_WIDTH_MM": 300.0,  # 左右跑道边界实际间距，mm；用于横向补偿的像素换算。
-    "LATERAL_OFFSET_MM": 10.0,  # 仅 vision-straight：正值向左偏，负值向右偏，0 = 画面居中。
+    "LATERAL_OFFSET_MM": 15.0,  # 仅 vision-straight：正值向左偏，负值向右偏，0 = 画面居中。
     "FOV_DEG": 70.0,
     "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
