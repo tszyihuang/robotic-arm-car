@@ -19,6 +19,8 @@ class VisionCfg:
     """视觉与控制参数（默认值来自 config.py；测试可直接构造）。"""
 
     lookahead: float | str = VISION_CONTROL["LOOKAHEAD"]  # 比例，或 "vanishing"（两侧边界延长线交点）
+    lane_width_mm: float = VISION_CONTROL["LANE_WIDTH_MM"]
+    lateral_offset_mm: float = 0.0  # + = 车向左偏；由 vision-straight 接口启用，align 默认不补偿。
     fov_deg: float = VISION_CONTROL["FOV_DEG"]
     focal_px: float | None = None
     width: int = VISION_CONTROL["FRAME_W"]
@@ -49,6 +51,13 @@ class VisionCfg:
     kp_pos: float = STRAIGHT["KP_POS"]
     gap_finish_mm: float = VISION_CONTROL["GAP_FINISH_MM"]
 
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.lane_width_mm) or self.lane_width_mm <= 0:
+            raise ValueError("LANE_WIDTH_MM 必须为有限正数（mm）")
+        if not math.isfinite(self.lateral_offset_mm):
+            raise ValueError("LATERAL_OFFSET_MM 必须为有限数（mm）")
+        if self.lateral_offset_mm and self.lookahead == "vanishing":
+            raise ValueError("横向偏移补偿需要数值 LOOKAHEAD；vanishing 只能修正航向")
 
     def size(self, info: dict | None) -> tuple[int, int]:
         """原帧尺寸：优先用 info 里模型报的 [宽,高]，没有就退回 720p 兜底值。"""
@@ -78,6 +87,8 @@ class TrackView:
     look_row: float         # 目标点的 y；数值前视被线段范围夹过，灭点允许在画面外
     x_look: float           # 目标点的 x（中心线前视点或灭点）
     lat_px: float           # x_look - u0；灭点模式下仅表示目标像素偏移，不是横向位置
+    target_x: float         # 画幅中心 + 横向补偿：跑道中心线应落到的位置
+    offset_px: float        # 本帧 mm 补偿换算的像素；正值要求跑道中线位于画面右侧
     e_deg: float            # 航向环误差：+ = 需要往左修
     head_deg: float | None  # 灭点算的纯航向项；两侧都在才是真值
     half_px: float | None   # 本帧前视行上的半宽（两侧都在时才有）
@@ -163,7 +174,6 @@ def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
     look_row = vp[1] if use_vp else clamp(cfg.lookahead * h, y_lo, y_hi)
     x_look = vp[0] if use_vp else a * look_row + b
     f = cfg.focal(w)
-    e_deg = math.degrees(math.atan2(u0 - x_look, f))
     head_deg = None
     if src == "both":
         if vp is not None:
@@ -174,6 +184,16 @@ def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
         xr = right[0] * look_row + right[1]
         if 1.0 < xr - xl < w:
             half_now = 0.5 * (xr - xl)
+
+    offset_px = 0.0
+    if cfg.lateral_offset_mm:
+        half_width = half_now if src == "both" else half_px
+        if half_width is None or not math.isfinite(half_width) or half_width <= 0:
+            return None  # 没有有效路宽，不能把 mm 换成像素补偿。
+        # 车向左移动时跑道中线在图像中向右移动，故正补偿把参考像素移向右。
+        offset_px = cfg.lateral_offset_mm / cfg.lane_width_mm * (2.0 * half_width)
+    target_x = u0 + offset_px
+    e_deg = math.degrees(math.atan2(target_x - x_look, f))
 
     if not absolute:
         # 单侧退化：保留相对角用于诊断，控制侧发现中心线不可用时停车。
@@ -187,7 +207,8 @@ def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
 
     return TrackView(a=a, b=b, y_lo=y_lo, y_hi=y_hi, src=src, absolute=absolute,
                      midline_deg=math.degrees(math.atan(-a)), look_row=look_row,
-                     x_look=x_look, lat_px=x_look - u0, e_deg=e_deg, head_deg=head_deg,
+                     x_look=x_look, lat_px=x_look - u0, target_x=target_x,
+                     offset_px=offset_px, e_deg=e_deg, head_deg=head_deg,
                      half_px=half_now, angle_left=angle_l, angle_right=angle_r)
 
 
@@ -195,8 +216,8 @@ def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
 class Heading:
     """一拍的航向环输入（VisionHeading.step 的结果）。"""
 
-    e: float                # 相对画幅中心的误差（度）：+ = 需要往左修；已滤波和外推
-    e_raw: float            # 帧时刻相对画幅中心的原始几何误差（诊断用）
+    e: float                # 相对补偿后目标的误差（度）：+ = 需要往左修；已滤波和外推
+    e_raw: float            # 帧时刻相对补偿后目标的原始几何误差（诊断用）
     lat_px: float           # 目标点相对画面中心的像素（前视点或灭点）
     head_deg: float | None  # 灭点算的纯航向项
     src: str                # both / left / right
@@ -326,7 +347,7 @@ class VisionHeading:
         return self.cam.age(now)
 
     def wait_track(self, seconds: float = VISION_CONTROL["TRACK_WAIT"], log=print, stop_event=None) -> TrackView | None:
-        """等待可信的跑道几何并记住半宽；误差始终以画幅中心为基准。"""
+        """等待可信的跑道几何并记住半宽；参考为画幅中心加横向补偿。"""
         end = time.monotonic() + max(seconds, 0.0)
         saw_relative = False
         while True:
@@ -337,8 +358,9 @@ class VisionHeading:
                 if v is not None:
                     self._remember(v)
                     if v.absolute:
-                        w, _ = self.cfg.size(s.info)
-                        log(f"  视觉参考固定为画幅中心 x={0.5 * w:g}px，"
+                        log(f"  视觉参考 x={v.target_x:g}px，"
+                            f"横向补偿 {self.cfg.lateral_offset_mm:+g}mm（正值向左），"
+                            f"像素补偿 {v.offset_px:+.1f}px，"
                             f"当前误差 {v.e_deg:+.2f}°")
                         return v
                     saw_relative = True
@@ -408,8 +430,8 @@ class VisionHeading:
         if s.info is not None and s.seq != self._seq and self.age(now) <= self.cfg.lost_stop:
             self._seq = s.seq
             v = track_view(self.cfg, s.info, self.half_px, self.ref)
-            if v is None and self.cfg.lookahead == "vanishing":
-                # 摄像头仍有新帧不等于灭点仍有效；清掉旧结果，让控制侧停车。
+            if v is None and (self.cfg.lookahead == "vanishing" or self.cfg.lateral_offset_mm):
+                # 新帧可能没有有效灭点/路宽；清掉旧结果，让控制侧停车。
                 self.view = None
                 return None
             if v is not None:
@@ -419,7 +441,7 @@ class VisionHeading:
                 self.n_degraded += 1 if not v.absolute else 0
                 self._remember(v)
                 e_raw = v.e_deg
-                e_frame = e_raw  # 固定以画幅中心为目标，保留起步时已有的偏移。
+                e_frame = e_raw  # 使用当前帧换算的补偿目标，保留起步时已有的偏移。
                 # 坏帧保护：一帧之差超过 e_gate 度就截断。关键点预测偶尔会跳一下，
                 # 单帧跳变直接进 PID 就是把方向盘掰一下，是"抖/摆"的常见来源。
                 if self.e_filt is not None and self.cfg.e_gate > 0:
@@ -450,7 +472,7 @@ class VisionHeading:
                        age=self.age(now), new=new)
 
 
-LOG_COLUMNS = ['t', 'dist_mm', 'e_deg', 'e_raw_deg', 'lat_px', 'head_deg', 'w_ref_dps', 'w_meas_dps', 'w_err_dps', 'trim_ff', 'trim_fb', 'trim_mms', 'v_l', 'v_r', 'set_l', 'set_r', 'gap_mm', 'src']
+LOG_COLUMNS = ['t', 'dist_mm', 'e_deg', 'e_raw_deg', 'lat_px', 'target_x', 'offset_px', 'head_deg', 'w_ref_dps', 'w_meas_dps', 'w_err_dps', 'trim_ff', 'trim_fb', 'trim_mms', 'v_l', 'v_r', 'set_l', 'set_r', 'cmd_l', 'cmd_r', 'gap_mm', 'src']
 
 
 def prepare_heading(heading, imu=None):
@@ -472,7 +494,7 @@ def prepare_heading(heading, imu=None):
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
                     log=print, log_path=None, stop_event=None):
-    """前段视觉巡线，最后 gap_finish_mm 用里程差保持航向（只支持前进）。"""
+    """视觉巡线；gap_finish_mm > 0 时末段改用里程差保持航向（只支持前进）。"""
     rl = None
     stopped = False
     try:
@@ -540,7 +562,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             v_meas = (v_l + v_r) / 2.0
             finish_gap_src.update(now, gap)
 
-            if gap_ref is None and goal_mm is not None and goal_mm - dist <= cfg.gap_finish_mm:
+            if (cfg.gap_finish_mm > 0 and gap_ref is None and goal_mm is not None
+                    and goal_mm - dist <= cfg.gap_finish_mm):
                 gap_ref = gap
                 loop.reset()  # 视觉积分不能带入新的编码器航向基准。
                 log(f"  剩余 {goal_mm - dist:.0f}mm，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
@@ -557,6 +580,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 if hd is None:
                     reason = ("视觉没有可用灭点：需要两侧边界且延长线有稳定交点，已停车"
                               if cfg.lookahead == "vanishing" else
+                              "横向补偿没有可用中心线或路宽，已停车"
+                              if cfg.lateral_offset_mm else
                               "视觉一直没有可用边界：确认边界模型开着、车在跑道上")
                     break
                 if not heading.view.absolute:
@@ -614,6 +639,12 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             check_cancel(stop_event)
             board.spd(cmd_l * s_sign[0], cmd_l * s_sign[1],
                       cmd_r * s_sign[2], cmd_r * s_sign[3])
+            if trim_n == 0 and gap_ref is None:
+                log(f"  视觉起步：前视行 {heading.view.look_row:.0f}px，"
+                    f"{'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+.1f}px，"
+                    f"像素补偿 {heading.view.offset_px:+.1f}px，目标 x={heading.view.target_x:.1f}px，"
+                    f"原始误差 {hd.e_raw:+.2f}°，修正 {trim:+.1f}mm/s，"
+                    f"左右轮指令 {cmd_l:+.1f}/{cmd_r:+.1f}mm/s")
 
             e_max = max(e_max, abs(e_now))
             if math.isfinite(loop.w_ref):
@@ -626,11 +657,15 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             trim_sat += 1 if abs(trim) >= 0.98 * cfg.trim_max else 0
             if log_path:
                 rl.row(f"{now - t_start:.3f}", f"{dist:.1f}", f"{e_now:.3f}", f"{hd.e_raw:.3f}",
-                       f"{hd.lat_px:.1f}", "" if hd.head_deg is None else f"{hd.head_deg:.2f}",
+                       f"{hd.lat_px:.1f}",
+                       "" if gap_ref is not None else f"{heading.view.target_x:.1f}",
+                       "" if gap_ref is not None else f"{heading.view.offset_px:.1f}",
+                       "" if hd.head_deg is None else f"{hd.head_deg:.2f}",
                        format_number(loop.w_ref, ".2f"), format_number(loop.w_meas, ".2f"),
                        format_number(loop.w_err, ".2f"), format_number(loop.trim_ff, ".1f"),
                        format_number(loop.trim_fb, ".1f"), f"{trim:.1f}",
                        f"{v_l:.1f}", f"{v_r:.1f}", f"{set_l:.0f}", f"{set_r:.0f}",
+                       f"{cmd_l:.1f}", f"{cmd_r:.1f}",
                        f"{gap:.1f}", hd.src)
 
             if now - t_log > 0.5:                    # 半秒一行，盯直线性和视觉状态
@@ -648,7 +683,9 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                     f"  修正 {trim:+6.1f}mm/s（前馈 {ff_txt} 反馈 {loop.trim_fb:+5.1f}）"
                     f"  {hd.src}"
                     + (f"  相对 gap {gap - gap_ref:+.1f}mm" if gap_ref is not None else
-                       f"  {'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+5.0f}px"))
+                       f"  {'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+5.0f}px"
+                       f"  补偿 {heading.view.offset_px:+.0f}px")
+                    + f"  轮速指令/实测 左 {cmd_l:+.0f}/{v_l:+.0f} 右 {cmd_r:+.0f}/{v_r:+.0f}mm/s")
         board.spd(0, 0, 0, 0)
         stopped = True
 

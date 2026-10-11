@@ -55,22 +55,29 @@ BALL_POSITION = {
     # 实测 20 mm/s 几乎不动；接近目标时采用可启动速度并提前制动。
     "min_speed": 35.0, "brake_tau": 0.04, "speed_window": 0.08,
     "accel": 100.0, "loop_hz": 100.0,
-    "settle": 0.2, "speed_tolerance": 5.0, "lost_timeout": 0.6,
+    "settle": 0.2, "speed_tolerance": 5.0,
+    "missing_frames": 3, "recovery_frames": 2,  # 连续缺球先暂停，恢复需完整的新帧确认。
+    "lost_timeout": 2.0,  # s，无有效完整画面持续这么久才终止；过期画面仍停止运动。
     "max_distance_m": 0.3, "timeout": 30.0,
 }
 
 # 物品校准独立调参，初值沿用小球；实际物品观察姿态下需重新标定 mm_per_px。
-OBJECT_POSITION = dict(BALL_POSITION)
+OBJECT_POSITION = dict(BALL_POSITION, missing_frames=1, recovery_frames=1, lost_timeout=0.6)
 
 VISION_CONTROL = {
-    "FRAME_W": 1280, "FRAME_H": 720, "LOOKAHEAD": 0.5, "FOV_DEG": 70.0,
+    "FRAME_W": 1280, "FRAME_H": 720,
+    "LOOKAHEAD": 0.7,  # 中心线在画面半高处的前视点，同时修正航向与横向偏移。
+    "LANE_WIDTH_MM": 300.0,  # 左右跑道边界实际间距，mm；用于横向补偿的像素换算。
+    "LATERAL_OFFSET_MM": 10.0,  # 仅 vision-straight：正值向左偏，负值向右偏，0 = 画面居中。
+    "FOV_DEG": 70.0,
     "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,
-    "KP_YAW": 7.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
-    "KP_RATE": 7.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
+    "KP_YAW": 5.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
+    "KP_RATE": 5.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
-    "GAP_FINISH_MM": 300.0,  # 视觉直走最后这段距离用 gap 保持切换时航向。
+    "GAP_FINISH_MM": 0.0,  # 0 = 全程视觉纠偏；正值 = 最后这段距离只用 gap 保持航向。
+    "LOG_DIR": ROOT / "logs" / "vision-straight",  # 每次行驶保存控制 CSV；None 关闭。
 }
 
 ALIGN = {

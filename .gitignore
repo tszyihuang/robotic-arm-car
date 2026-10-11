@@ -3,5 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 screenshots/
+/logs/
 tasks/target_lock_aim.json
 tasks/target_positions.json

@@ -21,7 +21,9 @@ def _run(base, vision, *, stop_event, config, log, kind, label, validator):
                 f"位置容差 ±{cfg['position_tolerance_mm']:g}mm，"
                 f"起步速度下限 {min(cfg['min_speed'], cfg['speed']):g} mm/s，"
                 f"主机轮速 Kp={cfg['speed_kp']:g}，Ki={cfg['speed_ki']:g}；"
-                f"提前制动，停稳后确认连续 {cfg['stable_frames']} 个新帧到位")
+                f"提前制动，停稳后确认连续 {cfg['stable_frames']} 个新帧到位；"
+                f"连续缺失 {cfg['missing_frames']} 帧先暂停，恢复确认 {cfg['recovery_frames']} 帧，"
+                f"持续 {cfg['lost_timeout']:g}s 无有效完整画面才终止")
             return None
         return getattr(base, f"calibrate_{kind}_position")(
             vision, config=cfg, stop_event=stop_event, log=log)

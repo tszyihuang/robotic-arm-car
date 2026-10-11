@@ -142,7 +142,7 @@ class Vision:
         return self._observe("object", None, timeout=timeout, stable_frames=1, include_size=True)
 
     def ball_layout_sample(self):
-        """非阻塞读取最新物体推理；保留缺球帧，让连续控制及时停车。"""
+        """非阻塞读取最新物体推理；保留缺球帧，供位置控制累计连续漏检。"""
         return self._layout_sample("ball")
 
     def object_layout_sample(self):

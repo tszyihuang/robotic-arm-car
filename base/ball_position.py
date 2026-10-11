@@ -25,8 +25,9 @@ def _validate_config(config, *, defaults, config_name, label):
             raise ValueError(f"{config_name}[{name!r}] 必须为有限非负数")
     if cfg["speed"] > straight.SPEED_LIMIT:
         raise ValueError(f"{label}校准速度不能超过 {straight.SPEED_LIMIT:g} mm/s")
-    if type(cfg["stable_frames"]) is not int or cfg["stable_frames"] < 1:
-        raise ValueError(f"{label}校准 stable_frames 必须为正整数")
+    for name in ('stable_frames', 'missing_frames', 'recovery_frames'):
+        if type(cfg[name]) is not int or cfg[name] < 1:
+            raise ValueError(f"{label}校准 {name} 必须为正整数")
     return cfg
 
 
@@ -143,6 +144,8 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
         last_valid_stamp = None
         identity = None
         centered = 0
+        missing_frames = recovered_frames = 0
+        recovering = False
         in_band = usable = False
         settled_since = None
         settled_position = (0.0, 0.0)
@@ -157,7 +160,9 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
         last_visual_state = None
         log(f"开始{label}位置 PID 校准：视觉换算 {cfg['mm_per_px']:g}mm/px，"
             f"最大速度 {cfg['speed']:g}mm/s，中心容差 ±{cfg['tolerance_px']:g}px，"
-            f"位置容差 ±{cfg['position_tolerance_mm']:g}mm")
+            f"位置容差 ±{cfg['position_tolerance_mm']:g}mm；"
+            f"连续缺失 {cfg['missing_frames']} 帧暂停，恢复确认 {cfg['recovery_frames']} 帧，"
+            f"无有效完整画面 {cfg['lost_timeout']:g}s 后终止")
 
         while True:
             check_cancel(stop_event)
@@ -188,7 +193,7 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
             if abs(gap) > straight.GAP_DEV_MAX:
                 raise RuntimeError(f"{label}位置校准左右里程差过大，已停车")
 
-            new_layout = False
+            new_layout = frame_complete = False
             layout = first if first is not None else getattr(vision, f"{kind}_layout_sample")()
             first = None
             if layout is not None:
@@ -199,29 +204,52 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
                     last_index, last_stamp = index, stamp
                     new_layout = True
                     middle, width = _middle_candidate(layout, label=label)
-                    usable = middle is not None
-                    if usable:
+                    frame_complete = middle is not None
+                    if frame_complete:
                         if identity is not None and middle["value"] != identity:
                             raise RuntimeError(f"中间{label}身份发生变化，已停止位置校准")
                         identity = middle["value"]
+                        missing_frames = 0
+                        if recovering:
+                            recovered_frames += 1
+                            usable = recovered_frames >= cfg['recovery_frames']
+                            if usable:
+                                recovering = False
+                        else:
+                            usable = True
+                            recovered_frames = 0
                         center_x, center_line = middle["center_x"], width / 2
                         error = center_x - center_line
                         last_valid_stamp = stamp
-                        in_band = abs(error) <= cfg["tolerance_px"]
+                        in_band = usable and abs(error) <= cfg["tolerance_px"]
                         centered = centered + 1 if in_band else 0
                         # 图像误差属于采集时刻；目标保持到下一张有效新帧，不能逐拍累加。
                         capture_distance = distance_at(positions, tick - age)
                         target_position = capture_distance + error * cfg["mm_per_px"]
                     else:
+                        missing_frames += 1
+                        recovered_frames = 0
                         centered = 0
-                        position.reset()
+                        in_band = False
+                        if missing_frames >= cfg['missing_frames']:
+                            usable = False
+                            recovering = True
             stale = last_valid_stamp is None or time.time() - last_valid_stamp >= min(
                 cfg["lost_timeout"], VISION["frame_stale"])
             missing = "缺球" if kind == "ball" else "缺物品"
-            visual_state = missing if not usable else "画面过期" if stale else "有效"
+            if stale:
+                recovering = True
+                recovered_frames = 0
+                visual_state = '画面过期'
+            elif recovering and recovered_frames:
+                visual_state = f"恢复确认 {recovered_frames}/{cfg['recovery_frames']}"
+            elif missing_frames:
+                visual_state = f"{missing} {missing_frames}帧（暂停阈值 {cfg['missing_frames']}帧）"
+            else:
+                visual_state = '有效'
             position_error = target_position - distance
             if not usable or stale:
-                # 新帧缺少候选立即断速；重复或过期帧不能延长视觉有效期。
+                # 持续缺失或过期时先停车等待；重复帧不计数，也不能延长有效期。
                 board.stop()
                 target = command_l = command_r = 0.0
                 target_position = distance
@@ -235,7 +263,9 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
                 head.i = speed_l.i = speed_r.i = 0.0
                 lost_for = tick - waiting_since if last_valid_stamp is None else time.time() - last_valid_stamp
                 if lost_for >= cfg["lost_timeout"]:
-                    raise TimeoutError(f"{label}位置校准视觉断流或持续{missing}，已停车")
+                    cause = f"持续{missing}" if missing_frames else '视觉断流'
+                    raise TimeoutError(f"{label}位置校准{cause}，{lost_for:.2f}s 未获得有效完整画面"
+                                       f"（连续缺失 {missing_frames} 帧），已停车")
             else:
                 position_reached = abs(position_error) <= cfg["position_tolerance_mm"]
                 velocity = (v_l + v_r) / 2
@@ -298,7 +328,7 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
                     settled_since = tick
                     settled_position = (left, right)
                 stopped = settled_since is not None and tick - settled_since >= cfg["settle"]
-                fresh_after_stop = (stopped and new_layout
+                fresh_after_stop = (stopped and new_layout and frame_complete
                                     and tick - max(0.0, time.time() - last_stamp) >= settled_since)
                 if stopped:
                     phase = "停稳"

@@ -24,8 +24,13 @@ class DryBase:
 
     def vision_straight(self, distance, vision):
         finish = VISION_CONTROL['GAP_FINISH_MM'] / 1000
-        detail = ("全程 gap 保持起步航向" if distance <= finish else
+        detail = ("全程视觉巡线，修正横向偏移" if finish == 0 else
+                  "全程 gap 保持起步航向" if distance <= finish else
                   f"剩余 ≤ {finish:g} m 切换 gap 保持当时航向")
+        if finish == 0 or distance > finish:
+            offset = VISION_CONTROL['LATERAL_OFFSET_MM']
+            detail += (f"，目标向{'左' if offset > 0 else '右'}偏 {abs(offset):g} mm"
+                       if offset else "，目标居中")
         print(f"base.vision_straight({distance:g} m, {BASE['speed']:g} mm/s)  # {detail}")
 
     def stop(self):

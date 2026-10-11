@@ -1,10 +1,12 @@
 """底盘直接接口；一条电机串口、一条 IMU 串口供整趟比赛共用。"""
 import math
 import threading
+from datetime import datetime
+from pathlib import Path
 
 from .control import check_cancel, cleanup, wait_cancelable
 from . import straight_pid, arc_turn, calibrate_position, vision_align, vision_straight, ball_position, object_position
-from config import BASE, SENSOR, ARM, POSITION, VISION
+from config import BASE, SENSOR, ARM, POSITION, VISION, VISION_CONTROL
 
 
 class Base:
@@ -123,16 +125,27 @@ class Base:
     def vision_straight(self, distance, vision):
         if not math.isfinite(distance) or distance <= 0:
             raise ValueError("视觉直走距离必须为有限正数")
-        cfg = vision_straight.VisionCfg(speed=self.config["speed"], track_mm=straight_pid.TRACK_MM)
+        cfg = vision_straight.VisionCfg(speed=self.config["speed"], track_mm=straight_pid.TRACK_MM,
+                                      lane_width_mm=VISION_CONTROL["LANE_WIDTH_MM"],
+                                      lateral_offset_mm=VISION_CONTROL["LATERAL_OFFSET_MM"])
         if distance * 1000 <= cfg.gap_finish_mm:
             self._connect()
             heading = vision_straight.VisionHeading(cfg, vision)
         else:
             heading = self._heading(vision)
+            heading.cfg.lane_width_mm = cfg.lane_width_mm
+            heading.cfg.lateral_offset_mm = cfg.lateral_offset_mm
             if heading.wait_track(stop_event=self.stop_event) is None:
                 raise RuntimeError("出发前未拿到可用跑道中心线")
+        log_path = None
+        if VISION_CONTROL["LOG_DIR"] is not None:
+            log_dir = Path(VISION_CONTROL["LOG_DIR"])
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{datetime.now():%Y%m%d_%H%M%S_%f}.csv"
+            print(f"  视觉直走日志：{log_path}")
         measured, info = vision_straight.vision_straight(
-            self.motor, heading, goal_mm=distance * 1000, stop_event=self.stop_event)
+            self.motor, heading, goal_mm=distance * 1000, log_path=log_path,
+            stop_event=self.stop_event)
         return self._require_success({"ok": not info["reason"] and
                                       abs(measured / 1000 - distance) <= max(0.03, 0.03 * distance),
                                       "distance_m": measured / 1000, "vision": info})

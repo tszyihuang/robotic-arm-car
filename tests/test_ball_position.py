@@ -145,6 +145,12 @@ class PositionPIDTests(unittest.TestCase):
                 with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
                     validate_config({field: value})
 
+    def test_missing_and_recovery_frame_counts_must_be_positive_integers(self):
+        for field in ('missing_frames', 'recovery_frames'):
+            for value in (0, -1, 1.5, True):
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
+                    validate_config({field: value})
+
 
 class ContinuousBallPositionTests(unittest.TestCase):
     def test_encoder_progress_reduces_position_error_between_visual_frames(self):
@@ -279,24 +285,76 @@ class ContinuousBallPositionTests(unittest.TestCase):
         robot.freeze = True
         robot.latest["capture_stamp"] = 99.5
         with self.assertRaisesRegex(TimeoutError, "视觉断流"):
-            robot.run()
+            robot.run(lost_timeout=0.6)
         self.assertLessEqual(robot.clock - 100, 0.12)
         self.assertEqual(robot.commands[-1][1], (0, 0, 0, 0))
 
-    def test_missing_frame_stops_immediately_and_recovery_resumes_pid(self):
+    def test_one_or_two_missing_frames_do_not_interrupt_motion(self):
+        for count in (1, 2):
+            with self.subTest(count=count):
+                robot = SimulatedRobot()
+                robot.missing = lambda: 2 <= robot.index < 2 + count
+                result = robot.run()
+                self.assertTrue(result['ok'])
+                self.assertEqual(len(robot.stops), 2, '单次漏检只影响到位确认，不暂停运动')
+                self.assertTrue(any(0.25 <= stamp - 100 < 0.45 and any(values)
+                                    for stamp, values in robot.commands))
+                self.assertEqual(robot.commands[-1][1], (0, 0, 0, 0))
+
+    def test_three_missing_frames_pause_until_two_new_complete_frames_recover(self):
         robot = SimulatedRobot()
-        robot.missing = lambda: 0.2 <= robot.clock - 100 < 0.4
-        result = robot.run()
-        self.assertTrue(result["ok"])
-        pause = next(stamp for stamp in robot.stops if 0.2 <= stamp - 100 < 0.5)
-        self.assertTrue(any(stamp > pause and any(values) for stamp, values in robot.commands))
-        self.assertEqual(robot.commands[-1][1], (0, 0, 0, 0))
+        robot.missing = lambda: 2 <= robot.index <= 4
+        messages = []
+        result = robot.run(log=messages.append)
+        self.assertTrue(result['ok'])
+        pause = next(stamp for stamp in robot.stops if 0.4 <= stamp - 100 < 0.5)
+        self.assertTrue(any(stamp < pause and any(values) for stamp, values in robot.commands))
+        self.assertTrue(all(not any(values) for stamp, values in robot.commands
+                            if pause <= stamp < 100.65 - 1e-6))
+        resumed = next(stamp for stamp, values in robot.commands if stamp > pause and any(values))
+        self.assertAlmostEqual(resumed - 100, 0.65, delta=0.02)
+        self.assertTrue(any('恢复确认 1/2' in message for message in messages))
+
+    def test_repeated_missing_frame_does_not_count_as_multiple_detections(self):
+        robot = SimulatedRobot()
+        robot.missing = lambda: True
+        advance = robot.advance
+
+        def freeze_after_first_missing(seconds, stop_event=None):
+            advance(seconds, stop_event)
+            if robot.index >= 1:
+                robot.freeze = True
+
+        robot.advance = freeze_after_first_missing
+        with self.assertRaisesRegex(TimeoutError, '校准超时'):
+            robot.run(timeout=0.5)
+        self.assertGreater(robot.sample_count, 30)
+        self.assertEqual(len(robot.stops), 2)
+
+    def test_stale_camera_pauses_but_can_recover_after_old_600ms_timeout(self):
+        robot = SimulatedRobot()
+        advance = robot.advance
+
+        def pause_camera(seconds, stop_event=None):
+            robot.freeze = 0.2 <= robot.clock - 100 < 1.0
+            # 恢复时重新开始按 10 Hz 采集，不补拍停顿期间的旧帧。
+            if not robot.freeze and robot.clock - 100 >= 1.0:
+                robot.next_capture = max(robot.next_capture, robot.clock)
+            advance(seconds, stop_event)
+
+        robot.advance = pause_camera
+        self.assertTrue(robot.run()['ok'])
+        pause = next(stamp for stamp in robot.stops if 0.65 <= stamp - 100 < 0.9)
+        self.assertTrue(all(not any(values) for stamp, values in robot.commands
+                            if pause <= stamp < 101.0))
+        self.assertTrue(any(stamp >= 101.1 and any(values) for stamp, values in robot.commands))
 
     def test_permanent_missing_frames_fail_without_more_motion(self):
         robot = SimulatedRobot()
         robot.missing = lambda: robot.clock - 100 >= 0.2
         with self.assertRaisesRegex(TimeoutError, "持续缺球"):
             robot.run()
+        self.assertGreaterEqual(robot.clock - 100, BALL_POSITION['lost_timeout'])
         first_stop = next(stamp for stamp in robot.stops if stamp - 100 > 0.1)
         self.assertTrue(all(not any(values) for stamp, values in robot.commands if stamp >= first_stop))
 

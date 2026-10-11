@@ -127,3 +127,6 @@ arm-home
 arm-calibrate
 
 arm-disable
+
+[2]
+vision-straight 2
