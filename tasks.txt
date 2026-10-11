@@ -40,7 +40,6 @@ calibrate-object-position   #人质任务点校准
 人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
 
 home
-arm-disable
 vision-straight 1.68
 
 
@@ -95,17 +94,17 @@ gripper-close
 [抓左边的物体]
 arm-calibrate
 gripper-open
-arm-move -127 0 102 91
-arm-move -127 114 128 -84
+arm-move -128 78 118 -50
+arm-move -128 110 134 -90
 gripper-close
-arm-move -127 34 116 16
+arm-move -128 34 116 16
 arm-home
 
 [抓中间的物体]
 arm-calibrate
 gripper-open
-arm-move -94 0 102 91
-arm-move -94 107 149 -97
+arm-move -94 62 136 -40
+arm-move -94 113 152 -110
 gripper-close
 arm-move -94 34 116 16
 arm-home
@@ -113,10 +112,10 @@ arm-home
 [抓右边的物体]
 arm-calibrate
 gripper-open
-arm-move -63 0 102 91
-arm-move -63 109 134 -83
+arm-move -60 82 121 -60
+arm-move -60 109 134 -83
 gripper-close
-arm-move -63 34 116 16
+arm-move -60 34 116 16
 arm-home
 
 
@@ -175,3 +174,40 @@ arm-move 90 106 84.5 47.5
 gripper-open
 gripper-close
 arm-home
+
+[抓左物]
+arm-calibrate
+arm-move -90 0 102 91
+calibrate-object-position 
+gripper-open
+arm-move -128 78 118 -50
+arm-move -128 110 134 -90
+gripper-close
+arm-move -128 34 116 16
+arm-home
+arm-disable
+
+
+[抓中物]
+arm-calibrate
+arm-move -90 0 102 91
+calibrate-object-position 
+gripper-open
+arm-move -94 62 136 -40
+arm-move -94 113 152 -110
+gripper-close
+arm-move -94 34 116 16
+arm-home
+arm-disable
+
+[抓右物]
+arm-calibrate
+arm-move -90 0 102 91
+calibrate-object-position 
+gripper-open
+arm-move -60 82 121 -60
+arm-move -60 109 134 -83
+gripper-close
+arm-move -60 34 116 16
+arm-home
+arm-disable
