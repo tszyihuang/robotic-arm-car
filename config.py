@@ -87,7 +87,8 @@ ARM = {
     "joint_signs": {1: 1, 2: 1, 3: -1, 4: 1},
     "joint_offsets_deg": {1: 0.0, 2: 0.0, 3: 160.0, 4: 24.0},
     "encoder_zero_deg": None, "speed_rpm": 10.0,
-    "arrival_tolerance_deg": 2.0, "move_timeout": 30.0,
+    "arrival_tolerance_deg": 5.0,  # °，各关节编码器到位容差；增大可减少接近目标时持续等待。
+    "move_timeout": 45.0,  # s，等待机械臂到位的最长时间；超时仍停止并尝试失能四轴。
     "gripper_port": None, "gripper_baudrate": None, "gripper_servo_id": 2,
     "gripper_speed": 1000, "gripper_timeout": 0.1,
     "gripper_open_angle_deg": 291.0, "gripper_close_angle_deg": 243.0,
@@ -96,7 +97,7 @@ ARM = {
 
 SERVO = {
     "default_id": 1, "baudrate": 1000000, "speed": 1000, "timeout": 0.1,
-    "fixed_positions": {1: 340},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
+    "fixed_positions": {1: 345},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
     "probe_baudrates": (1000000, 115200, 500000, 250000, 128000, 76800, 57600, 38400),
 }
 

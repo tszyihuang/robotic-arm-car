@@ -4,8 +4,8 @@ arm-calibrate            # 扫码姿态前建立机械臂软件基准
 arm-move 6 0 160 1
 scan-qrcode    # 三位任务码：排爆物颜色、反恐靶颜色、救援目标形状
 home
-turn 87 0.38
-turn -45 0.52
+turn 87 0.4
+turn -44 0.54
 turn -42 0
 straight 0.7     #过减速带
 calibrate-position  #过减速带后校准
@@ -31,8 +31,8 @@ detect-targets        #识别标靶
 打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
 home
 
-straight 0.22
-turn -87 0.40
+straight 0.28
+turn -87 0.36
 vision-straight 0.6
 
 arm-move -90 0 102 91
@@ -125,9 +125,5 @@ arm-home
 
 [1]
 arm-calibrate
-arm-move -90 55 74 89
-detect-balls
-calibrate-ball-position   #小球任务点校准
 
-home
 arm-disable

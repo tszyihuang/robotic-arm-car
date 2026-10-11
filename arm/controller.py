@@ -192,7 +192,13 @@ class Arm:
             if all(abs(joints[a] - v) <= self.config.arrival_tolerance_deg for a, v in target.items()):
                 return True
             if time.monotonic() >= deadline:
-                raise MotionTimeout(f"{timeout:g} 秒内未到位，停止本次运动并尝试失能四轴")
+                pending = "; ".join(
+                    f"ID{a} 目标 {v:g}°，实际 {joints[a]:.2f}°，误差 {joints[a] - v:+.2f}°"
+                    for a, v in target.items()
+                    if abs(joints[a] - v) > self.config.arrival_tolerance_deg)
+                raise MotionTimeout(
+                    f"{timeout:g} 秒内未到位（容差 ±{self.config.arrival_tolerance_deg:g}°；{pending}），"
+                    "停止本次运动并尝试失能四轴")
             wait_cancelable(0.05, stop_event)
 
     def move_joints(self, joints, *, wait=True, speed_rpm=None, accel_rpm_s=None,
