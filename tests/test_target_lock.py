@@ -505,7 +505,7 @@ class AcquisitionRunTests(TargetLockRunHarness):
         self.bus.motors[2].move.assert_called_once()
         self.bus.motors[3].move.assert_not_called()
 
-    def test_slow_recovery_does_not_consume_frames_or_repeat_return_commands(self):
+    def test_slow_recovery_keeps_consuming_frames_without_repeating_return_commands(self):
         original = self.bus.motors[1].move
 
         def deferred_return(angle, *args, **kwargs):
@@ -515,24 +515,16 @@ class AcquisitionRunTests(TargetLockRunHarness):
         self.bus.motors[1].move = Mock(side_effect=deferred_return)
         camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 4)]
                                       + [(image(None), 4, 0)] + [(scene(), i, 0) for i in range(5, 8)])
-        waiting = 0
-
-        def update(state, result):
-            nonlocal waiting
-            if state == "正在复位到 arm-move -90 0 160 4":
-                waiting += 1
-                self.assertEqual(camera.next_frame.call_count, 4)
-                self.assertEqual(self.bus.motors[1].move.call_count, 2)
-                if waiting == 2:
-                    self.bus.motors[1].angle = 0
-
+        updates = Mock()
         with self.assertRaises(KeyboardInterrupt):
-            run(camera, self.bus, arm_config=ArmConfig(arrival_tolerance_deg=0.01),
-                on_update=update, log=lambda _: None)
-        self.assertEqual(waiting, 2)
+            run(camera, self.bus, on_update=updates, log=lambda _: None)
+        self.assertEqual(camera.next_frame.call_count, 8)
+        results = [call.args[1] for call in updates.call_args_list if call.args[1] is not None]
+        self.assertEqual([result["target"]["value"] for result in results], ["red", "red"])
+        self.assertEqual(sum(call.args[0] == 0 for call in self.bus.motors[1].move.call_args_list), 1)
         self.bus.motors[3].move.assert_called_once()
 
-    def test_prearrival_frame_cannot_count_toward_reacquisition(self):
+    def test_frame_before_reset_command_cannot_count_toward_reacquisition(self):
         camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 4)]
                                       + [(image(None), 4, 0), (scene(), 5, 0.2)]
                                       + [(scene(), i, 0) for i in range(6, 9)])
@@ -540,9 +532,9 @@ class AcquisitionRunTests(TargetLockRunHarness):
         with self.assertRaises(KeyboardInterrupt):
             run(camera, self.bus, on_update=updates, log=lambda _: None)
         results = [call.args[1] is not None for call in updates.call_args_list]
-        self.assertEqual(results, [False, False, True, False, False, False, False, False, True])
+        self.assertEqual(results, [False, False, True, False, False, False, False, True])
 
-    def test_recovery_timeout_holds_all_four_axes_and_stops_task(self):
+    def test_stuck_recovery_does_not_time_out_or_stop_task(self):
         original = self.bus.motors[1].move
 
         def stuck_return(angle, *args, **kwargs):
@@ -550,13 +542,12 @@ class AcquisitionRunTests(TargetLockRunHarness):
                 return original(angle, *args, **kwargs)
 
         self.bus.motors[1].move = Mock(side_effect=stuck_return)
-        camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 4)] + [(image(None), 4, 0)])
-        with self.assertRaisesRegex(TimeoutError, "复位超时"):
-            run(camera, self.bus, arm_config=ArmConfig(move_timeout=0.03, arrival_tolerance_deg=0.01),
-                log=lambda _: None)
-        self.assertEqual(camera.next_frame.call_count, 4)
-        for addr in JOINT_IDS:
-            self.assertEqual(self.bus.motors[addr].move.call_args.kwargs["speed_rpm"], 0.01)
+        camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 4)]
+                                      + [(image(None), i, 0) for i in range(4, 111)])
+        run(camera, self.bus, duration=1, log=lambda _: None)
+        self.assertGreater(camera.next_frame.call_count, 4)
+        self.assertNotEqual(self.bus.motors[1].angle, 0)
+        self.bus.motors[3].move.assert_called_once_with(0.0, speed_rpm=ARM["speed_rpm"])
 
     def test_recovery_uses_configured_encoder_zero_instead_of_current_feedback(self):
         zero = {1: 100, 2: 200, 3: 300, 4: 400}
@@ -572,7 +563,8 @@ class TargetLockRunTests(TargetLockRunHarness):
 
     def test_completion_includes_eight_pixel_boundary_and_requires_full_two_seconds(self):
         camera = self.scripted_camera([(scene(x=168, y=128), i, 0) for i in range(1, 6)])
-        result = run(camera, self.bus, config={"hz": 2}, complete_after=2, log=lambda _: None)
+        result = run(camera, self.bus, config={"hz": 2}, complete_after=2,
+                     complete_tolerance_px=8, log=lambda _: None)
         self.assertEqual(result, {"ok": True, "color": "red", "errors": {1: 8, 4: 8},
                                   "stable_seconds": 2})
         self.assertEqual(self.clock.now, 2)
@@ -585,17 +577,17 @@ class TargetLockRunTests(TargetLockRunHarness):
                          (scene(None), 3, 0), (scene(x=168, y=128), 2, 0),
                          (scene(x=168, y=128), 3, 0.8), (scene(x=168, y=128), 3, -1),
                          (TimeoutError(), 3, 0))
-        for interruption_index, interruption in enumerate(interruptions):
+        for interruption in interruptions:
             with self.subTest(interruption=interruption[1:]):
                 self.clock.now = 0
                 aligned = scene(x=168, y=128)
                 samples = [(aligned, 1, 0), (aligned, 2, 0), interruption]
                 samples += [(aligned, i, 0) for i in range(4, 9)]
                 camera = self.scripted_camera(samples)
-                result = run(camera, self.bus, config={"hz": 2}, complete_after=2, log=lambda _: None)
+                result = run(camera, self.bus, config={"hz": 2}, complete_after=2,
+                             complete_tolerance_px=8, log=lambda _: None)
                 self.assertEqual(result["stable_seconds"], 2)
-                # 超容差仍在跟踪；缺靶和无效帧需要额外一拍确认复位到位。
-                self.assertEqual(self.clock.now, 3.5 if interruption_index < 2 else 4)
+                self.assertEqual(self.clock.now, 3.5)
                 self.assertEqual(camera.next_frame.call_count, 8)
 
     def test_long_gap_between_fresh_frames_restarts_alignment_timer(self):

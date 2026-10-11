@@ -16,7 +16,6 @@ class Arm:
                  gripper=None, stop_event=None):
         self.config = config or ArmConfig()
         self._closed = False
-        self._target = None
         self._simulate = simulate
         self._gripper = gripper
         self._bus = bus if bus is not None else (
@@ -63,20 +62,30 @@ class Arm:
             self.config.gripper_open_angle_deg - self.config.gripper_close_angle_deg)
 
 
-    def _read_raw(self, stop_event=None):
+    def _read_statuses(self, stop_event=None):
         if self._closed:
             raise ArmError("机械臂已关闭")
-        raw = {}
+        statuses = {}
         for addr in JOINT_IDS:
             check_cancel(stop_event)
             status = self._bus.motors[addr].read_status()
             check_cancel(stop_event)
             check_fault(status, addr)
+            statuses[addr] = status
+        return statuses
+
+    @staticmethod
+    def _positions(statuses):
+        raw = {}
+        for addr, status in statuses.items():
             try:
                 raw[addr] = finite(status["multi_turn_deg"], f"ID{addr} 编码器读数")
             except (KeyError, ValueError) as exc:
                 raise ProtocolError(f"ID{addr} 编码器读数无效") from exc
         return raw
+
+    def _read_raw(self, stop_event=None):
+        return self._positions(self._read_statuses(stop_event))
 
     def _logical(self, raw):
         return {a: self.config.joint_offsets_deg[a] + self.config.joint_signs[a] *
@@ -103,7 +112,6 @@ class Arm:
             self._abort_on_error(include_gripper=False)
             raise
         self.encoder_zero_deg = dict(raw)
-        self._target = None
         return dict(self.encoder_zero_deg)
 
 
@@ -147,7 +155,6 @@ class Arm:
         check_cancel(stop_event)
 
     def _abort(self, *, include_gripper=True):
-        self._target = None
         try:
             self._bus.disable_all()
         finally:
@@ -167,45 +174,39 @@ class Arm:
         """失能四轴；include_gripper=False 保持夹爪，下一条位置命令重新使能。"""
         self._abort(include_gripper=include_gripper)
 
-    def wait_for_arrival(self, target=None, timeout=None, *, stop_event=None):
-        target = self._target if target is None else target
-        if target is None:
-            raise ValueError("没有待等待的目标")
-        if not set(target) or not set(target) <= set(JOINT_IDS):
-            raise ValueError("等待目标的关节号无效")
-        target = {a: finite(v, f"ID{a} 等待目标") for a, v in target.items()}
-        timeout = self.config.move_timeout if timeout is None else finite(timeout, "到位超时")
-        if timeout <= 0:
-            raise ValueError("到位超时必须大于 0")
-        try:
-            return self._wait(target, timeout, stop_event)
-        except BaseException:
-            self._abort_on_error(include_gripper=False)
-            raise
-
-    def _wait(self, target, timeout, stop_event=None):
-        deadline = time.monotonic() + timeout
+    def _wait(self, target, stop_event=None):
+        deadline = time.monotonic() + self.config.move_timeout
+        still_since = None
         while True:
             check_cancel(stop_event)
-            joints = self.get_joints(stop_event=stop_event)
+            statuses = self._read_statuses(stop_event)
+            joints = self._logical(self._positions(statuses))
+            try:
+                speeds = {a: finite(statuses[a]["speed_rpm"], f"ID{a} 转速") for a in target}
+            except (KeyError, ValueError) as exc:
+                raise ProtocolError("机械臂到位检查的速度反馈无效") from exc
+            now = time.monotonic()
             check_cancel(stop_event)
-            if all(abs(joints[a] - v) <= self.config.arrival_tolerance_deg for a, v in target.items()):
-                return True
-            if time.monotonic() >= deadline:
-                pending = "; ".join(
-                    f"ID{a} 目标 {v:g}°，实际 {joints[a]:.2f}°，误差 {joints[a] - v:+.2f}°"
-                    for a, v in target.items()
-                    if abs(joints[a] - v) > self.config.arrival_tolerance_deg)
-                raise MotionTimeout(
-                    f"{timeout:g} 秒内未到位（容差 ±{self.config.arrival_tolerance_deg:g}°；{pending}），"
-                    "停止本次运动并尝试失能四轴")
-            wait_cancelable(0.05, stop_event)
+            arrived = all(abs(joints[a] - angle) <= self.config.arrival_tolerance_deg
+                          and abs(speeds[a]) <= self.config.arrival_speed_rpm
+                          for a, angle in target.items())
+            still_since = (now if still_since is None else still_since) if arrived else None
+            if still_since is not None and now - still_since >= self.config.arrival_settle_seconds:
+                return
+            remaining = deadline - now
+            if remaining <= 0:
+                pending = '; '.join(f'ID{a} 目标 {angle:g}°，实际 {joints[a]:.2f}°，'
+                                    f'误差 {joints[a] - angle:+.2f}°，速度 {speeds[a]:+.2f}rpm'
+                                    for a, angle in target.items())
+                raise MotionTimeout(f'机械臂 {self.config.move_timeout:g}s 内未到位并停稳'
+                                    f'（容差 ±{self.config.arrival_tolerance_deg:g}°；{pending}）')
+            wait_cancelable(min(.05, remaining), stop_event)
 
     def move_joints(self, joints, *, wait=True, speed_rpm=None, accel_rpm_s=None,
                     order="together", gripper=None, stop_event=None):
-        """四轴等时移动；可选夹爪开度 0..1，只等待四轴到位。
+        """四轴等时移动；默认等待编码器到位并停稳，可选夹爪开度 0..1。
 
-        order: together / plane-first / base-first；分段时每段内同步。
+        order: together / plane-first / base-first；阻塞时等待前一段完成再发后一段。
         所有目标与协议参数在首条运动指令前校验。
         """
         target = validate_joints(joints, self.config)
@@ -230,19 +231,18 @@ class Arm:
                 groups = (JOINT_IDS,)
             profiles = [self._motion_profile(current, target, group, speed, accel_rpm_s)
                         for group in groups]
-            self._send(profiles[0], stop_event)
-            if segmented:
-                self._wait({addr: target[addr] for addr in groups[0]},
-                           self.config.move_timeout, stop_event)
-                # 前段等待可能改变后段位置，按最新反馈重新规划。
-                current = self.get_joints(stop_event=stop_event)
-                self._send(self._motion_profile(current, target, groups[1], speed, accel_rpm_s), stop_event)
-            self._target = dict(target)
+            for index, profile in enumerate(profiles):
+                if index and wait:
+                    current = self.get_joints(stop_event=stop_event)
+                    profile = self._motion_profile(current, target, groups[index], speed, accel_rpm_s)
+                self._send(profile, stop_event)
+                if wait:
+                    self._wait(target if index == len(profiles) - 1 else
+                               {a: target[a] for a in profile}, stop_event)
             if servo is not None:
                 check_cancel(stop_event)
-                servo.move_angle(gripper_angle, wait=False)
-            if wait:
-                self._wait(target, self.config.move_timeout, stop_event)
+                servo.move_angle(gripper_angle, wait=wait, stop_event=stop_event,
+                                 allow_contact=self._opening(gripper) == 0.0)
             check_cancel(stop_event)
         except BaseException:
             self._abort_on_error(include_gripper=False)
@@ -253,7 +253,6 @@ class Arm:
         """关闭连接；disable_motors=False 时保留四轴的使能及最后位置目标。"""
         if not self._closed:
             self._closed = True
-            self._target = None
             actions = [("四轴总线", lambda: self._bus.close(disable_motors=disable_motors))]
             if self._gripper is not None:
                 actions.append(("夹爪串口", self._gripper.close))

@@ -133,7 +133,6 @@ class ArmControlTests(unittest.TestCase):
                 self.addCleanup(arm.close)
                 servo = arm._connect_gripper()
                 servo.move_angle = Mock(wraps=servo.move_angle)
-                servo.wait_for_arrival = Mock()
                 sent = []
                 for addr, motor in arm._bus.motors.items():
                     move = motor.move
@@ -146,8 +145,39 @@ class ArmControlTests(unittest.TestCase):
                 arm.move_joints(target, order=order, gripper="open")
                 self.assertEqual(sent, expected)
                 self.assertEqual(arm.get_joints(), target)
-                servo.move_angle.assert_called_once_with(291.0, wait=False)
-                servo.wait_for_arrival.assert_not_called()
+                servo.move_angle.assert_called_once_with(291.0, wait=True, stop_event=None,
+                                                         allow_contact=False)
+
+    def test_explicit_nonblocking_joint_commands_do_not_wait_for_encoders(self):
+        targets = ({1: 90, 2: 82, 3: 142, 4: -56}, {1: -90, 2: 0, 3: 160, 4: 4})
+        for order in ("together", "plane-first", "base-first"):
+            with self.subTest(order=order):
+                arm = JointController(simulate=True)
+                self.addCleanup(arm.close)
+                initial = arm.get_joints()
+                for motor in arm._bus.motors.values():
+                    motor.move = Mock()  # 指令有应答，编码器位置始终不变。
+                for target in targets:
+                    self.assertEqual(arm.move_joints(target, order=order, wait=False), target)
+                self.assertEqual(arm.get_joints(), initial)
+                for motor in arm._bus.motors.values():
+                    self.assertEqual(motor.move.call_count, 2)
+
+    def test_task_moves_and_home_wait_for_post_command_encoder_reads(self):
+        session = Arm(simulate=True)
+        session.dry_run = True
+        self.addCleanup(session.close)
+        with contextlib.redirect_stdout(io.StringIO()):
+            session.calibrate()
+        for motor in session._bus.motors.values():
+            motor.move = Mock(wraps=motor.move)
+            motor.read_status = Mock(wraps=motor.read_status)
+        for step in (Step(1, "arm-move", (90, 82, 142, -56)),
+                     Step(2, "arm-move", (-90, 0, 160, 4)), Step(3, "home", ())):
+            self.assertTrue(execute(step, None, session, None)["ok"])
+        for motor in session._bus.motors.values():
+            self.assertEqual(motor.move.call_count, 3)
+            self.assertGreater(motor.read_status.call_count, 3)
 
     def test_invalid_gripper_mode_cannot_start_joints(self):
         arm = JointController(simulate=True)

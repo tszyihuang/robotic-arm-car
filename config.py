@@ -2,13 +2,13 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-STEP_GAP = 0.5  # 沿用任务表每步间隔；干跑不等待。
+STEP_GAP = 0.05  # 沿用任务表每步间隔；干跑不等待。
 
 BASE = {
     "motor_port": "",  # 留空自动识别；实机建议填稳定串口路径。
     "baudrate": 115200,
-    "speed": 150.0,
-    "turn_speed": 150.0,
+    "speed": 300.0,
+    "turn_speed": 250.0,
     "turn_spin_speed": 150.0,
     "turn_radius": 0.3,
     "turn_track_width": 0.41,
@@ -35,6 +35,10 @@ TURN = {
     "ANGLE_KP": 1.5, "PATH_KP": 8.0, "PATH_KD": 1.5, "RATE_KP": 0.5,
     "WHEEL_SPEED_KP": 0.6, "BRAKE_LEAD_SECONDS": 0.02,
     "BRAKE_KP": 3000.0, "STOP_ANGLE_DEG": 0.6, "SETTLE_SECONDS": 0.25,
+    # 仅原地转向使用：轮速单位 m/s；50 mm/s 为待实车确认的收尾下限。
+    "SPIN_MIN_WHEEL_SPEED": 0.05, "SPIN_STOP_ANGLE_DEG": 1.0,
+    "SPIN_BRAKE_LEAD_SECONDS": 0.04,
+    "LOG_DIR": ROOT / "logs" / "turn",  # 每次转弯保存 CSV；None 关闭。
 }
 
 POSITION = {
@@ -95,8 +99,8 @@ ARM = {
     "joint_signs": {1: 1, 2: 1, 3: -1, 4: 1},
     "joint_offsets_deg": {1: 0.0, 2: 0.0, 3: 160.0, 4: 24.0},
     "encoder_zero_deg": None, "speed_rpm": 10.0,
-    "arrival_tolerance_deg": 5.0,  # °，各关节编码器到位容差；增大可减少接近目标时持续等待。
-    "move_timeout": 45.0,  # s，等待机械臂到位的最长时间；超时仍停止并尝试失能四轴。
+    "arrival_tolerance_deg": 2.0, "move_timeout": 30.0,
+    "arrival_settle_seconds": 0.2, "arrival_speed_rpm": 0.5,
     "gripper_port": None, "gripper_baudrate": None, "gripper_servo_id": 2,
     "gripper_speed": 1000, "gripper_timeout": 0.1,
     "gripper_open_angle_deg": 291.0, "gripper_close_angle_deg": 243.0,
@@ -105,6 +109,7 @@ ARM = {
 
 SERVO = {
     "default_id": 1, "baudrate": 1000000, "speed": 1000, "timeout": 0.1,
+    "move_timeout": 8.0, "arrival_tolerance": 6, "settle_seconds": 0.2,
     "fixed_positions": {1: 345},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
     "probe_baudrates": (1000000, 115200, 500000, 250000, 128000, 76800, 57600, 38400),
 }

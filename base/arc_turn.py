@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """单段转弯：剩余转角减速 + 圆弧配速 + IMU 修正 → 驱动板速度接口。
 
-IMU 决定何时停车，编码器修正圆弧半径并限制异常行程。程序不使用积分、
-最低轮速或末尾原地补角；R=0 共用控制循环。每次调用最终停车，串口由底盘接口持有。
+IMU 决定何时停车，编码器修正圆弧半径并限制异常行程。圆弧不设最低轮速；
+原地转向使用收尾轮速下限和提前制动。不使用积分或末尾补角，每次调用最终停车。
 """
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ WHEEL_SPEED_KP = TURN["WHEEL_SPEED_KP"]
 BRAKE_LEAD_SECONDS = TURN["BRAKE_LEAD_SECONDS"]
 STOP_ANGLE = math.radians(TURN["STOP_ANGLE_DEG"])
 SETTLE_SECONDS = TURN["SETTLE_SECONDS"]
+SPIN_MIN_WHEEL_SPEED = TURN["SPIN_MIN_WHEEL_SPEED"]
+SPIN_STOP_ANGLE = math.radians(TURN["SPIN_STOP_ANGLE_DEG"])
+SPIN_BRAKE_LEAD_SECONDS = TURN["SPIN_BRAKE_LEAD_SECONDS"]
 
 
 class WheelFeedback:
@@ -78,16 +81,14 @@ class ArcPlan:
     def length(self):
         return self.radius * abs(self.angle)
 
-    @property
-    def tolerance(self):
-        return max(math.radians(1.0), 0.05 * abs(self.angle))
-
     def step(self, travel, yaw, dt, rate=0.0, speed=None):
         dt = clamp(dt, 0.0, 0.03)
         sign = math.copysign(1.0, self.angle)
         remaining = sign * (self.angle - yaw)
         # 根据实测角速度提前断速；达到刹车条件后不再起步或倒转补角。
-        stop_window = STOP_ANGLE + BRAKE_LEAD_SECONDS * max(0.0, sign * rate)
+        stop_angle = SPIN_STOP_ANGLE if self.radius == 0 else STOP_ANGLE
+        brake_lead = SPIN_BRAKE_LEAD_SECONDS if self.radius == 0 else BRAKE_LEAD_SECONDS
+        stop_window = stop_angle + brake_lead * max(0.0, sign * rate)
         path_ready = self.radius == 0 or travel >= .97 * self.radius * abs(yaw)
         self.braking |= remaining <= 0 or (remaining <= stop_window and path_ready)
         if self.braking:
@@ -115,6 +116,9 @@ class ArcPlan:
             target_w = w_ref + PATH_KD * (sign * forward_speed / self.radius - rate)
         # 不使用积分，转弯只沿目标方向推进。
         target_w = sign * max(0.0, sign * target_w)
+        if self.radius == 0:
+            # 收尾仍须带动车轮；下限只作用于原地转向，不改变圆弧内外轮配速。
+            target_w = sign * max(sign * target_w, 2 * SPIN_MIN_WHEEL_SPEED / self.track)
         w_limit = min(2.0, 2 * max(self.wheel_limit - self.v, 0.0) / self.track)
         if self.radius > self.track / 2:
             w_limit = min(w_limit, 2 * self.v / self.track)
@@ -151,13 +155,17 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
         raise ValueError('转弯超时必须为正有限数值')
     source = 'IMU' if imu else '编码器'
     if verbose:
-        print(f'  圆弧计划：R={radius_m:g}m，{degrees:+g}°，弧长 {plan.length:.3f}m，'
-              f'巡航 {plan.cruise * 1000:.0f}mm/s，驱动板速度闭环 + IMU 修正（程序 Ki=0）')
+        if radius_m == 0:
+            print(f'  原地转向计划：{degrees:+g}°，轮速上限 {plan.wheel_limit * 1000:.0f}mm/s，'
+                  f'收尾轮速 {min(SPIN_MIN_WHEEL_SPEED, plan.wheel_limit) * 1000:.0f}mm/s，'
+                  f'驱动板速度闭环 + {source} 修正（程序 Ki=0）')
+        else:
+            print(f'  圆弧计划：R={radius_m:g}m，{degrees:+g}°，弧长 {plan.length:.3f}m，'
+                  f'巡航 {plan.cruise * 1000:.0f}mm/s，驱动板速度闭环 + {source} 修正（程序 Ki=0）')
     rows = []
     log_file = None
     travel = yaw = 0.0
     fault = None
-    settled = False
     started = None
     elapsed = 0.0
     timeout = timeout_s or (plan.length / max(plan.cruise, 0.01) + abs(plan.angle) / 0.5 + 5)
@@ -195,6 +203,7 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
             previous_counts = origin
             rate = 0.0
             still_since = None
+            commands = (0.0,) * 4
             while True:
                 check_cancel(stop_event)
                 now = time.monotonic()
@@ -218,9 +227,9 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
                     break
                 if board.counts != previous_counts:
                     last_motion, previous_counts = now, board.counts
-                elif not plan.braking and now - last_motion > 1.5:
-                    fault = '运动指令下发后编码器持续无变化'
-                    break
+                elif not any(round(v * 1000) for v in commands):
+                    # 尚未发送可执行的非零指令时，不累计堵转时间。
+                    last_motion = now
                 distances = [(n - n0) / COUNTS_PER_METER for n, n0 in zip(board.counts, origin)]
                 travel = sum(distances) / 4
                 yaw = math.radians(imu.yaw) if imu else ((distances[2] + distances[3]) -
@@ -240,6 +249,14 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
                     break
                 if math.copysign(1.0, plan.angle) * yaw < -math.radians(5):
                     fault = '转向与目标相反'
+                    break
+                # 先按本拍最新角度判断刹车，再检查堵转，避免已经到位却误报。
+                if not plan.braking and now - last_motion > 1.5:
+                    sent = ','.join(str(round(v * 1000)) for v in commands)
+                    fault = ('运动指令下发后编码器持续无变化'
+                             f'（已转 {math.degrees(yaw):+.2f}°，'
+                             f'剩余 {math.degrees(plan.angle - yaw):+.2f}°，'
+                             f'四轮指令 {sent}mm/s）')
                     break
                 send_start = time.monotonic()
                 brake_pwm = (0, 0, 0, 0)
@@ -265,7 +282,6 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
                                and abs(rate) < math.radians(2))
                     still_since = (still_since if still_since is not None else now) if stopped else None
                     if still_since is not None and now - still_since >= SETTLE_SECONDS:
-                        settled = True
                         break
                 if now - started >= timeout:
                     fault = '转弯超时'
@@ -284,14 +300,15 @@ def turn_with_radius(radius_m, degrees, *, board=None, imu=None, cruise=0.25,
     error = math.degrees(plan.angle - yaw)
     effective = abs(travel / yaw) if radius_m > 0 and abs(yaw) > 1e-6 else None
     radius_error = 100 * (effective / radius_m - 1) if effective is not None else None
-    in_tolerance = abs(error) <= math.degrees(plan.tolerance)
-    at_goal = settled and in_tolerance
-    ok = at_goal and fault is None and (radius_error is None or abs(radius_error) <= 5)
+    ok = fault is None
+    summary = (f'{degrees:+g}° → {math.degrees(yaw):+.2f}°，'
+               f'剩余 {error:+.2f}°，弧长 {travel:.3f}m，'
+               f'{"OK" if ok else fault}')
+    if verbose and not dry_run:
+        print(f'  转弯结果：{summary}')
     return dict(angle_deg=degrees, turned_deg=math.degrees(yaw), yaw_deg=math.degrees(yaw),
                 angle_error_deg=error, distance_m=abs(travel), arc_length_m=abs(travel), radius_m=radius_m,
                 effective_radius_m=effective, radius_error_pct=radius_error, elapsed_s=elapsed,
-                ok=ok, at_goal=at_goal, in_tolerance=in_tolerance,
-                tolerance_deg=math.degrees(plan.tolerance), fault=fault, heading_source=source,
+                ok=ok, fault=fault, heading_source=source,
                 dry_run=dry_run, log_path=log_path,
-                summary=f'{degrees:+g}° → {math.degrees(yaw):+.2f}°，弧长 {travel:.3f}m，'
-                        f'{"OK" if ok else (fault or "未到位")}')
+                summary=summary)

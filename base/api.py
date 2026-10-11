@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .control import check_cancel, cleanup, wait_cancelable
 from . import straight_pid, arc_turn, calibrate_position, vision_align, vision_straight, ball_position, object_position
-from config import BASE, SENSOR, ARM, POSITION, VISION, VISION_CONTROL
+from config import BASE, SENSOR, ARM, POSITION, VISION, VISION_CONTROL, TURN
 
 
 class Base:
@@ -40,7 +40,7 @@ class Base:
         if not result["ok"]:
             raise RuntimeError(result.get("fault") or result.get("reason")
                                or result.get("vision", {}).get("reason")
-                               or result.get("summary") or f"底盘未到位：{result}")
+                               or result.get("summary") or f"底盘动作失败：{result}")
         return result
 
     def straight(self, distance, speed=None):
@@ -50,9 +50,7 @@ class Base:
         self._connect()
         measured, info = straight_pid.straight(self.motor, distance * 1000, speed,
                                              stop_event=self.stop_event)
-        tolerance = max(0.03, 0.03 * abs(distance))
-        return self._require_success({"ok": not info["reason"] and
-                                      abs(measured / 1000 - abs(distance)) <= tolerance,
+        return self._require_success({"ok": not info["reason"],
                                       "distance_m": measured / 1000 * (1 if distance > 0 else -1), **info})
 
     def turn(self, degrees, radius=None):
@@ -62,10 +60,17 @@ class Base:
         arc_turn.make_plan(radius, degrees, speed, limit, self.config["turn_track_width"])
         self._connect()
         imu = self.imu if self.imu is not None and self.imu.has_data() else None
+        log_path = None
+        if TURN["LOG_DIR"] is not None:
+            log_dir = Path(TURN["LOG_DIR"])
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{datetime.now():%Y%m%d_%H%M%S_%f}.csv"
+            print(f"  转弯日志：{log_path}")
         result = arc_turn.turn_with_radius(radius, degrees, board=self.motor, imu=imu,
                                           cruise=speed, max_speed=limit,
                                           timeout_s=self.config["turn_timeout"],
                                           track_width_m=self.config["turn_track_width"],
+                                          log_path=log_path,
                                           stop_event=self.stop_event)
         return self._require_success(result)
 
@@ -146,8 +151,7 @@ class Base:
         measured, info = vision_straight.vision_straight(
             self.motor, heading, goal_mm=distance * 1000, log_path=log_path,
             stop_event=self.stop_event)
-        return self._require_success({"ok": not info["reason"] and
-                                      abs(measured / 1000 - distance) <= max(0.03, 0.03 * distance),
+        return self._require_success({"ok": not info["reason"],
                                       "distance_m": measured / 1000, "vision": info})
 
     def stop(self):

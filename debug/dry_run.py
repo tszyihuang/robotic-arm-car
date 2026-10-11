@@ -61,16 +61,16 @@ class DryArm:
         from arm.config import ArmConfig
         from arm.joints import validate_joints
         validate_joints(dict(enumerate((q1, q2, q3, q4), 1)), ArmConfig())
-        print(f"arm.move_joints({q1:g}, {q2:g}, {q3:g}, {q4:g}) °")
+        print(f"arm.move_joints({q1:g}, {q2:g}, {q3:g}, {q4:g}) °  # 实机等待四轴到位并停稳")
 
     def home(self):
-        print(f"arm.home()  # 本次初始姿态 {tuple(ARM['joint_offsets_deg'].values())}")
+        print(f"arm.home()  # 本次初始姿态 {tuple(ARM['joint_offsets_deg'].values())}，实机等待到位并停稳")
 
     def open_gripper(self):
-        print(f"arm.open_gripper()  # ID{ARM['gripper_servo_id']}，{ARM['gripper_open_angle_deg']:g}°")
+        print(f"arm.open_gripper()  # ID{ARM['gripper_servo_id']}，{ARM['gripper_open_angle_deg']:g}°，实机等待张开到位")
 
     def close_gripper(self):
-        print(f"arm.close_gripper()  # ID{ARM['gripper_servo_id']}，{ARM['gripper_close_angle_deg']:g}°，不等待到位")
+        print(f"arm.close_gripper()  # ID{ARM['gripper_servo_id']}，{ARM['gripper_close_angle_deg']:g}°，实机等待闭合到位或运动后停稳")
 
     def cancel(self):
         pass

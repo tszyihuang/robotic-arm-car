@@ -235,7 +235,7 @@ def restore_speed_integral(bus, addresses):
 
 
 class RecoveryPose:
-    """发送一次四轴复位命令，逐拍确认到位；等待期间不会被 PID 覆盖。"""
+    """发送一次四轴复位命令，不等待编码器到位。"""
 
     def __init__(self, bus, config=None, encoder_zero=None, stop_event=None):
         self.bus = bus
@@ -256,25 +256,12 @@ class RecoveryPose:
         self.active = False
 
     def start(self, stop_event):
-        self.started = time.monotonic()
         self.active = True
         for addr, angle in self.targets.items():
             check_cancel(stop_event)
             self.bus.motors[addr].move(angle, speed_rpm=self.config.speed_rpm)
-
-    def arrived(self, stop_event):
-        current = {}
-        for addr in JOINT_IDS:
-            check_cancel(stop_event)
-            current[addr] = read_angle(self.bus.motors[addr])
         check_cancel(stop_event)
-        if all(abs(current[addr] - angle) <= self.config.arrival_tolerance_deg
-               for addr, angle in self.targets.items()):
-            self.active = False
-            return True
-        if time.monotonic() - self.started >= self.config.move_timeout:
-            raise TimeoutError("机械臂复位超时：未到达 arm-move -90 0 160 4")
-        return False
+        self.active = False
 
 
 def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=None, log=print,
@@ -316,67 +303,59 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
             check_cancel(stop_event)
             tick = time.monotonic()
             result = None
-            if recovery.active:
-                if recovery.arrived(stop_event):
-                    # 到位前采集的画面不能用于下一轮确认。
-                    capture_start = time.time()
-                    state = "复位完成，等待红绿蓝三个标靶稳定出现"
+            try:
+                if candidate_source is None:
+                    frame, new_index, stamp = camera.next_frame(
+                        after=index, timeout=max(period, 0.1), stop_event=stop_event)
+                    size = (frame.shape[1], frame.shape[0])
                 else:
-                    state = "正在复位到 arm-move -90 0 160 4"
+                    # YOLO 帧率可能低于控制频率；等待新推理至视觉新鲜度上限。
+                    timeout = VISION["frame_stale"]
+                    if duration:
+                        timeout = min(timeout, max(0.0, duration - (time.monotonic() - start)))
+                    sample = candidate_source(after=index, timeout=timeout, stop_event=stop_event)
+                    if sample is None:
+                        raise TimeoutError("等待 YOLO 标靶新结果")
+                    candidates, size = sample["candidates"], sample["size"]
+                    new_index, stamp = sample["frame_index"], sample["capture_stamp"]
+            except TimeoutError:
+                acquisition.reset()
+                state = "等待 YOLO 标靶新结果"
             else:
-                try:
+                # 只消费本轮开始后采集的新帧，检查采集时间递增及识别后的帧龄。
+                fresh = (new_index > index and stamp >= capture_start
+                         and -0.1 <= time.time() - stamp < VISION["frame_stale"]
+                         and (previous_stamp is None or stamp > previous_stamp))
+                index = max(index, new_index)
+                if fresh:
                     if candidate_source is None:
-                        frame, new_index, stamp = camera.next_frame(
-                            after=index, timeout=max(period, 0.1), stop_event=stop_event)
-                        size = (frame.shape[1], frame.shape[0])
+                        info = predictor.predict(frame)
+                        candidates = candidates_from_detections(info["detections"], "target")
+                    check_cancel(stop_event)
+                    fresh = -0.1 <= time.time() - stamp < VISION["frame_stale"]
+                state = "目标丢失" if fresh else "画面重复或过期"
+                if fresh:
+                    ready = candidates if tracking else acquisition.step(candidates, size, stamp)
+                    if ready is None:
+                        state = (f"等待红绿蓝三个标靶稳定出现 "
+                                 f"({acquisition.count}/{cfg['stable_frames']})")
                     else:
-                        # YOLO 帧率可能低于控制频率；等待新推理至视觉新鲜度上限。
-                        timeout = VISION["frame_stale"]
-                        if duration:
-                            timeout = min(timeout, max(0.0, duration - (time.monotonic() - start)))
-                        sample = candidate_source(after=index, timeout=timeout, stop_event=stop_event)
-                        if sample is None:
-                            raise TimeoutError("等待 YOLO 标靶新结果")
-                        candidates, size = sample["candidates"], sample["size"]
-                        new_index, stamp = sample["frame_index"], sample["capture_stamp"]
-                except TimeoutError:
-                    acquisition.reset()
-                    state = "等待 YOLO 标靶新结果"
-                else:
-                    # 只消费本轮开始后采集的新帧，检查采集时间递增及识别后的帧龄。
-                    fresh = (new_index > index and stamp >= capture_start
-                             and -0.1 <= time.time() - stamp < VISION["frame_stale"]
-                             and (previous_stamp is None or stamp > previous_stamp))
-                    index = max(index, new_index)
-                    if fresh:
-                        if candidate_source is None:
-                            info = predictor.predict(frame)
-                            candidates = candidates_from_detections(info["detections"], "target")
-                        check_cancel(stop_event)
-                        fresh = -0.1 <= time.time() - stamp < VISION["frame_stale"]
-                    state = "目标丢失" if fresh else "画面重复或过期"
-                    if fresh:
-                        ready = candidates if tracking else acquisition.step(candidates, size, stamp)
-                        if ready is None:
-                            state = (f"等待红绿蓝三个标靶稳定出现 "
-                                     f"({acquisition.count}/{cfg['stable_frames']})")
-                        else:
-                            dt = period if previous_stamp is None else max(1e-4, stamp - previous_stamp)
-                            result = controller.step(ready, size, dt,
-                                                     aim=aim.point() if aim is not None else (0.5, 0.5))
-                            if result is not None:
-                                if not tracking:
-                                    check_cancel(stop_event)
-                                    tracking = True
-                                    bus.motors[2].move(cfg["motor2_angle_deg"],
-                                                       speed_rpm=recovery.config.speed_rpm)
-                                current = {addr: read_angle(bus.motors[addr]) for addr in AXES}
+                        dt = period if previous_stamp is None else max(1e-4, stamp - previous_stamp)
+                        result = controller.step(ready, size, dt,
+                                                 aim=aim.point() if aim is not None else (0.5, 0.5))
+                        if result is not None:
+                            if not tracking:
                                 check_cancel(stop_event)
-                                if not -0.1 <= time.time() - stamp < VISION["frame_stale"]:
-                                    result = None
-                                    state = "画面过期"
-                    else:
-                        acquisition.reset()
+                                tracking = True
+                                bus.motors[2].move(cfg["motor2_angle_deg"],
+                                                   speed_rpm=recovery.config.speed_rpm)
+                            current = {addr: read_angle(bus.motors[addr]) for addr in AXES}
+                            check_cancel(stop_event)
+                            if not -0.1 <= time.time() - stamp < VISION["frame_stale"]:
+                                result = None
+                                state = "画面过期"
+                else:
+                    acquisition.reset()
             if result is None:
                 controller.lost()
                 previous_stamp = None
@@ -385,8 +364,9 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
                     controller.center = None
                     acquisition.reset()
                     recovery.start(stop_event)
+                    capture_start = time.time()
                     tracking = False
-                    state += "，复位到 arm-move -90 0 160 4 后重新等待"
+                    state += "，已下发 arm-move -90 0 160 4 复位指令，重新等待"
             else:
                 commands = {}
                 for addr in AXES:

@@ -13,7 +13,7 @@ from base import straight_pid, arc_turn, calibrate_position
 from sensor.imu import ImuLink, FUNC_RAW, FUNC_QUAT
 from vision.api import Vision
 from base.control import MotionCancelled
-from config import TURN
+from config import TURN, VISION_CONTROL
 from tasks import pause
 
 
@@ -71,6 +71,37 @@ class DeviceConstructionTests(unittest.TestCase):
         base.imu.close.assert_not_called()
         base.motor.close.assert_not_called()
         base.close()
+
+    def test_movement_distance_error_does_not_block_following_commands(self):
+        base = Base()
+        base.motor, base._imu_checked = Mock(), True
+        heading, vision = Mock(), Mock()
+        with patch.object(straight_pid, "straight", return_value=(20, {"reason": ""})), \
+                patch.object(base, "_heading", return_value=heading), \
+                patch("base.vision_straight.vision_straight", return_value=(900, {"reason": ""})), \
+                patch.dict(VISION_CONTROL, LOG_DIR=None):
+            forward = base.straight(0.3)
+            backward = base.straight(-0.3)
+            visual = base.vision_straight(0.3, vision)
+        self.assertTrue(all(result["ok"] for result in (forward, backward, visual)))
+        self.assertEqual(forward["distance_m"], 0.02)
+        self.assertEqual(backward["distance_m"], -0.02)
+        self.assertEqual(visual["distance_m"], 0.9)
+
+    def test_movement_feedback_faults_still_stop_task(self):
+        base = Base()
+        base.motor, base._imu_checked = Mock(), True
+        with patch.object(straight_pid, "straight", return_value=(20, {"reason": "编码器数据中断"})):
+            with self.assertRaisesRegex(RuntimeError, "编码器数据中断"):
+                base.straight(0.3)
+        with patch.object(arc_turn, "turn_with_radius", return_value={"ok": False, "fault": "IMU 数据中断"}):
+            with self.assertRaisesRegex(RuntimeError, "IMU 数据中断"):
+                base.turn(87, 0.38)
+        with patch.object(base, "_heading", return_value=Mock()), \
+                patch("base.vision_straight.vision_straight", return_value=(20, {"reason": "编码器数据中断"})), \
+                patch.dict(VISION_CONTROL, LOG_DIR=None):
+            with self.assertRaisesRegex(RuntimeError, "编码器数据中断"):
+                base.vision_straight(0.3, Mock())
 
     def test_partial_motor_startup_failure_closes_serial(self):
         serial_board = Mock()

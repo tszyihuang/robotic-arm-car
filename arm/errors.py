@@ -11,4 +11,4 @@ class MotorFault(ArmError):
 
 
 class MotionTimeout(ArmError):
-    """关节未在规定时间内到位。"""
+    """运动未在规定时间内完成。"""

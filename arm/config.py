@@ -34,10 +34,12 @@ class ArmConfig:
         if (isinstance(self.serial_latency_ms, bool) or not isinstance(self.serial_latency_ms, int)
                 or not 1 <= self.serial_latency_ms <= 255):
             raise ValueError("serial_latency_ms 必须是 [1, 255] 内的整数毫秒")
-        for name in ("serial_timeout", "speed_rpm",
-                     "arrival_tolerance_deg", "move_timeout"):
+        for name in ("serial_timeout", "speed_rpm", "arrival_tolerance_deg",
+                     "move_timeout", "arrival_speed_rpm"):
             if finite(getattr(self, name), name) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        if finite(self.arrival_settle_seconds, "arrival_settle_seconds") < 0:
+            raise ValueError("arrival_settle_seconds 不能小于 0")
         if not 0.01 <= self.speed_rpm <= 0xFFFFFFFF / 100:
             raise ValueError("speed_rpm 超出协议可表示范围")
         if self.gripper_port is not None and (not isinstance(self.gripper_port, str) or not self.gripper_port):

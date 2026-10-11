@@ -140,25 +140,25 @@ class Arm:
             raise RuntimeError("机械臂未校准，请先执行 arm-calibrate")
         return self._arm
 
-    def _move(self, joints, gripper, stop_event):
+    def _move(self, joints, gripper, stop_event, wait=True):
         arm = self._require_calibrated()
         event = self._event(stop_event)
         try:
             check_cancel(event)
             if gripper is not None:
                 arm._gripper = self._ensure_servo()
-            arm.move_joints(joints, gripper=gripper, stop_event=event)
+            arm.move_joints(joints, gripper=gripper, stop_event=event, wait=wait)
             check_cancel(event)
         except BaseException:
             self._stop_after_error()
             raise
         return {"ok": True}
 
-    def move_joints(self, q1, q2, q3, q4, gripper=None, *, stop_event=None):
-        return self._move(dict(enumerate((q1, q2, q3, q4), start=1)), gripper, stop_event)
+    def move_joints(self, q1, q2, q3, q4, gripper=None, *, stop_event=None, wait=True):
+        return self._move(dict(enumerate((q1, q2, q3, q4), start=1)), gripper, stop_event, wait)
 
-    def home(self, *, stop_event=None):
-        return self._move(self._initial_joints, None, stop_event)
+    def home(self, *, stop_event=None, wait=True):
+        return self._move(self._initial_joints, None, stop_event, wait)
 
     def disable(self):
         if self._arm is not None:
@@ -175,14 +175,14 @@ class Arm:
             self._arm.disable(include_gripper=False)
         return {"ok": True}
 
-    def move_gripper(self, angle, *, stop_event=None):
-        """复用 STS 驱动和连接；夹持物体时不等待闭合角到位。"""
+    def move_gripper(self, angle, *, stop_event=None, wait=True, allow_contact=False):
+        """默认等待舵机完成；闭合可按运动后停稳确认，不要求穿过被夹物体。"""
         event = self._event(stop_event)
         check_cancel(event)
         try:
             servo = self._ensure_servo()
             check_cancel(event)
-            servo.move_angle(angle, wait=False)
+            servo.move_angle(angle, wait=wait, stop_event=event, allow_contact=allow_contact)
             check_cancel(event)
         except BaseException:
             self._stop_after_error()
@@ -195,7 +195,7 @@ class Arm:
 
     def close_gripper(self, *, stop_event=None):
         return self.move_gripper(self.config.gripper_close_angle_deg,
-                                 stop_event=stop_event)
+                                 stop_event=stop_event, allow_contact=True)
 
     def close(self):
         arm, servo, bus = self._arm, self._servo, self._bus

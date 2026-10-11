@@ -48,7 +48,7 @@ class PID:
 
 def straight(board, distance_mm, v_cruise, kp_gap=KP_GAP, ki_gap=KI_GAP,
              kd_gap=KD_GAP, log_path=None, log=print, stop_event=None):
-    """返回沿行进方向的距离（mm，恒为正）与到位／故障诊断。"""
+    """返回沿行进方向的距离（mm，恒为正）与运动／故障诊断。"""
     run_log = None
     try:
         check_cancel(stop_event)

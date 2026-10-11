@@ -2,10 +2,11 @@
 import contextlib
 import io
 import unittest
+from unittest.mock import patch
 
 from arm.api import Arm
 from arm.config import ArmConfig
-from arm.servo import FeetechSTSServo, SERVO_STEP_PER_DEG
+from arm.servo import FeetechSTSServo, SERVO_FIXED_POSITIONS, SERVO_STEP_PER_DEG
 from debug.dry_run import DryArm
 
 
@@ -48,7 +49,7 @@ class UnrestrictedServoTests(unittest.TestCase):
     def test_tool_calibration_target_does_not_lock_later_movements(self):
         servo = self.make_servo(1)
         servo.hold_fixed_position(1)
-        self.assertEqual(servo.read_position(), 340)
+        self.assertEqual(servo.read_position(), SERVO_FIXED_POSITIONS[1])
         servo.move_angle(120)
         self.assertEqual(servo.read_position(), 1365)
         servo.hold()
@@ -80,3 +81,10 @@ class UnrestrictedServoTests(unittest.TestCase):
             with self.subTest(angle=angle), self.assertRaises(ValueError):
                 servo.move_angle(angle)
         self.assertFalse(servo.status()['torque_enabled'])
+
+    def test_explicit_nonblocking_servo_commands_skip_arrival_reads(self):
+        servo = self.make_servo(2)
+        with patch.object(servo, 'read_position', side_effect=AssertionError('不应检测到位')):
+            servo.move_to(3000, wait=False)
+            servo.move_angle(243, wait=False)
+        self.assertTrue(servo.status()['torque_enabled'])

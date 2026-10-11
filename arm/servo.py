@@ -12,6 +12,7 @@ import warnings
 from .config import finite
 from config import SERVO
 from .errors import ArmError, MotionTimeout, ProtocolError
+from base.control import check_cancel, wait_cancelable
 
 SERVO_ID = SERVO['default_id']
 SERVO_BAUDRATE = SERVO['baudrate']
@@ -185,32 +186,87 @@ class FeetechSTSServo:
                 self._motion_commanded = False
                 self._target = None
 
-    def move_to(self, target_position, target_speed=None, target_time=0, *, wait=False):
-        """发送单圈绝对位置 0..4095；可选择等待到位，所有参数先验证。"""
+    def move_to(self, target_position, target_speed=None, target_time=0, *, wait=False,
+                stop_event=None, allow_contact=False):
+        """发送单圈绝对位置 0..4095；wait=True 时等待实际运动完成。"""
         target = _integer(target_position, "目标位置", 0, 4095)
         speed = _integer(self.speed if target_speed is None else target_speed, "舵机速度", 1, 3400)
         target_time = _integer(target_time, "目标时间", 0, 65535)
         with self._lock:
             try:
+                check_cancel(stop_event)
                 if self.read_register(MODE, 1)[0] != 0:
                     raise ValueError("只支持单圈位置模式（mode=0）；请先用舵机配置工具确认模式")
+                initial = self.read_position() if wait else None
+                check_cancel(stop_event)
                 self._motion_commanded = True
                 self._write_register(GOAL_POSITION, struct.pack("<HHH", target, target_time, speed))
                 self._write_register(TORQUE_ENABLE, b"\x01")
                 self._target = target
                 if wait:
-                    self.wait_for_arrival(target)
+                    self.wait_for_arrival(target, stop_event=stop_event, allow_contact=allow_contact,
+                                          initial_position=initial)
+                check_cancel(stop_event)
             except BaseException:
                 self._stop_after_error()
                 raise
         return target
 
-    def move_angle(self, angle_deg, target_speed=None, *, wait=False):
+    def move_angle(self, angle_deg, target_speed=None, *, wait=False,
+                   stop_event=None, allow_contact=False):
         """绝对编码器角度 0..360°，不改变零点或安装方向。"""
         angle = finite(angle_deg, "舵机绝对角度")
         if not 0 <= angle <= 360:
             raise ValueError("舵机绝对角度必须在 [0, 360]° 范围内")
-        return self.move_to(round(angle * SERVO_STEP_PER_DEG), target_speed, wait=wait)
+        return self.move_to(round(angle * SERVO_STEP_PER_DEG), target_speed, wait=wait,
+                            stop_event=stop_event, allow_contact=allow_contact)
+
+    def wait_for_arrival(self, target_position=None, *, tolerance=None, timeout=None,
+                         settle_seconds=None, stop_event=None, allow_contact=False,
+                         initial_position=None):
+        target = _integer(self._target if target_position is None else target_position,
+                          "等待目标", 0, 4095)
+        tolerance = _integer(SERVO['arrival_tolerance'] if tolerance is None else tolerance,
+                             "到位容差", 0, 2047)
+        timeout = finite(SERVO['move_timeout'] if timeout is None else timeout, "舵机到位超时")
+        settle = finite(SERVO['settle_seconds'] if settle_seconds is None else settle_seconds,
+                        "舵机停稳时间")
+        if timeout <= 0 or settle <= 0:
+            raise ValueError("舵机到位超时和停稳时间必须大于 0")
+        started = time.monotonic()
+        deadline = started + timeout
+        still_since = anchor = None
+        try:
+            check_cancel(stop_event)
+            initial = self.read_position() if initial_position is None else initial_position
+            while True:
+                check_cancel(stop_event)
+                state = self.status()
+                check_cancel(stop_event)
+                now = time.monotonic()
+                position = state['position']
+                stopped = not state['moving'] and abs(state['speed_raw']) <= 5
+                reached = abs(position - target) <= tolerance
+                # 运动标志可能在堵住时仍为真，必须看到编码器实际朝目标推进。
+                progressed = abs(position - target) + tolerance < abs(initial - target)
+                ready = (state['torque_enabled'] and stopped
+                         and (reached or (allow_contact and progressed)))
+                if not ready:
+                    still_since = anchor = None
+                elif still_since is None or abs(position - anchor) > tolerance:
+                    still_since, anchor = now, position
+                if (still_since is not None and now - still_since >= settle
+                        and (reached or now - started >= .3)):
+                    return True
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise MotionTimeout(f'夹爪 ID{self.servo_id} {timeout:g}s 内未完成动作'
+                                        f'（目标 {target}，实际 {position}，'
+                                        f'运动中 {state["moving"]}，速度 {state["speed_raw"]}）')
+                wait_cancelable(min(.02, remaining), stop_event)
+        except BaseException:
+            self._stop_after_error()
+            raise
 
     def move_relative_deg(self, delta_deg, target_speed=None, *, wait=False):
         """保留原项目正=逆时针的映射；模 4096，仅给出最终单圈目标。"""
@@ -225,26 +281,6 @@ class FeetechSTSServo:
             except BaseException:
                 self._stop_after_error()
                 raise
-
-    def wait_for_arrival(self, target_position=None, *, tolerance=6, timeout=8.0):
-        target = _integer(self._target if target_position is None else target_position,
-                          "等待目标", 0, 4095)
-        tolerance = _integer(tolerance, "到位容差", 0, 2047)
-        timeout = finite(timeout, "舵机到位超时")
-        if timeout <= 0:
-            raise ValueError("舵机到位超时必须大于 0")
-        deadline = time.monotonic() + timeout
-        try:
-            while True:
-                if abs(self.read_position() - target) <= tolerance:
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MotionTimeout(f"舵机 {timeout:g} 秒内未到位")
-                time.sleep(min(0.02, remaining))
-        except BaseException:
-            self._stop_after_error()
-            raise
 
     def hold(self):
         with self._lock:
