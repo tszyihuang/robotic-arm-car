@@ -156,3 +156,28 @@ class LaneSimulationTests(unittest.TestCase):
                 self.assertAlmostEqual(world.x, -offset, delta=5)
                 self.assertLess(abs(math.degrees(world.yaw)), 2)
                 self.assertEqual(world.command, [0, 0])
+
+    def test_visual_outage_uses_gap_and_recovery_resumes_lateral_correction(self):
+        for recover in (False, True):
+            with self.subTest(recover=recover):
+                world = LaneWorld(80 if recover else 0)
+                publish = world.publish
+
+                def interrupted_publish():
+                    elapsed = world.now - 100
+                    if elapsed < 2 or (recover and elapsed >= 4):
+                        publish()
+
+                world.publish = interrupted_publish
+                heading = vs.VisionHeading(world.cfg, world)
+                with patch.object(vs.time, 'time', side_effect=lambda: world.now):
+                    measured, info = vs.vision_straight(world, heading, goal_mm=1760,
+                                                       log=lambda _: None)
+                self.assertFalse(info['reason'])
+                self.assertAlmostEqual(measured, 1760, delta=30)
+                self.assertEqual(info['blind_switches'], 1)
+                self.assertEqual(info['vision_recoveries'], int(recover))
+                self.assertEqual(info['heading_mode'], 'vision' if recover else 'gap-blind')
+                self.assertLess(abs(world.x), 5)
+                self.assertLess(abs(math.degrees(world.yaw)), 2)
+                self.assertEqual(world.command, [0, 0])

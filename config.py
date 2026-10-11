@@ -66,13 +66,14 @@ OBJECT_POSITION = dict(BALL_POSITION, missing_frames=1, recovery_frames=1, lost_
 
 VISION_CONTROL = {
     "FRAME_W": 1280, "FRAME_H": 720,
-    "LOOKAHEAD": 0.7,  # 中心线在画面半高处的前视点，同时修正航向与横向偏移。
+    "LOOKAHEAD": 0.7,  # 前视行占画面高度的比例，同时修正航向与横向偏移。
     "LANE_WIDTH_MM": 300.0,  # 左右跑道边界实际间距，mm；用于横向补偿的像素换算。
     "LATERAL_OFFSET_MM": 10.0,  # 仅 vision-straight：正值向左偏，负值向右偏，0 = 画面居中。
     "FOV_DEG": 70.0,
     "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
-    "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,
+    "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,  # 直走视觉过期后切换 gap；align 仍停车。
+    "GAP_RECOVERY_FRAMES": 2,  # gap 盲走期间，连续有效新帧达到此数量后恢复视觉纠偏。
     "KP_YAW": 5.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
     "KP_RATE": 5.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,

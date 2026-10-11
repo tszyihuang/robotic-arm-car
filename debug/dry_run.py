@@ -31,6 +31,8 @@ class DryBase:
             offset = VISION_CONTROL['LATERAL_OFFSET_MM']
             detail += (f"，目标向{'左' if offset > 0 else '右'}偏 {abs(offset):g} mm"
                        if offset else "，目标居中")
+            detail += (f"，视觉丢失切换 gap 盲走，连续 {VISION_CONTROL['GAP_RECOVERY_FRAMES']} 帧"
+                       "有效后恢复视觉")
         print(f"base.vision_straight({distance:g} m, {BASE['speed']:g} mm/s)  # {detail}")
 
     def stop(self):

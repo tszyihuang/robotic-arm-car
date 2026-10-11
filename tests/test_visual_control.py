@@ -158,13 +158,17 @@ class VisionControlTests(unittest.TestCase):
                 self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
                 self.assertTrue(path.read_text().startswith('t,err_deg'))
 
-    def test_lost_vision_stops_straight_loop(self):
+    def test_lost_vision_uses_gap_until_target_distance(self):
             board = Mock()
-            board.feedback.return_value = ([0]*4, None)
+            board.feedback.side_effect = [([0]*4, None), ([10]*4, None), *[([1000]*4, None)]*4]
             hd = heading()
-            hd.cam.age.side_effect = [0, hd.cfg.lost_stop + 1]
-            _, info = vs.vision_straight(board, hd, goal_mm=100, log=lambda _: None)
-            self.assertIn('没有新边界', info['reason'])
+            hd.cam.age.return_value = hd.cfg.lost_stop + 1
+            with patch.dict(BASE, meters_per_count=0.001):
+                distance, info = vs.vision_straight(board, hd, goal_mm=1000, log=lambda _: None)
+            self.assertEqual(distance, 1000)
+            self.assertFalse(info['reason'])
+            self.assertEqual(info['heading_mode'], 'gap-blind')
+            self.assertEqual(info['blind_switches'], 1)
             self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
 
     def test_settling_feedback_failure_closes_motion_log(self):
@@ -249,8 +253,9 @@ class LaneCenteringTests(unittest.TestCase):
             with paths[0].open() as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual(float(rows[0]['lat_px']), -40)
-            self.assertEqual(float(rows[0]['offset_px']), 100)
-            self.assertEqual(float(rows[0]['target_x']), 740)
+            offset_px = 600 * VISION_CONTROL['LATERAL_OFFSET_MM'] / VISION_CONTROL['LANE_WIDTH_MM']
+            self.assertAlmostEqual(float(rows[0]['offset_px']), offset_px, delta=0.05)
+            self.assertAlmostEqual(float(rows[0]['target_x']), 640 + offset_px, delta=0.05)
             self.assertGreater(float(rows[0]['cmd_r']), float(rows[0]['cmd_l']))
             self.assertEqual(rows[0]['src'], 'both')
         self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
@@ -313,7 +318,7 @@ class LaneCenteringTests(unittest.TestCase):
                 self.assertGreater(direction * (second.args[2] - second.args[0]), 0)
                 self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
 
-    def test_default_straight_still_stops_for_stale_vision_near_finish(self):
+    def test_default_straight_uses_gap_for_stale_vision_near_finish(self):
         cam = camera(lane())
         hd = vs.VisionHeading(vs.VisionCfg(), cam)
         clock = [10.0]
@@ -331,8 +336,9 @@ class LaneCenteringTests(unittest.TestCase):
         with patch.dict(BASE, meters_per_count=0.001), \
                 patch.object(vs.time, 'time', side_effect=lambda: clock[0]):
             _, info = vs.vision_straight(board, hd, goal_mm=1000, log=lambda _: None)
-        self.assertIn('没有新边界', info['reason'])
-        self.assertEqual(len(board.spd.call_args_list), 2)
+        self.assertFalse(info['reason'])
+        self.assertEqual(info['heading_mode'], 'gap-blind')
+        self.assertEqual(len(board.spd.call_args_list), 3)
         self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
 
     def test_base_default_requires_vision_for_every_distance(self):
@@ -356,7 +362,7 @@ class LateralCalibrationTests(unittest.TestCase):
             with self.subTest(offset=offset):
                 cfg = vs.VisionCfg(lane_width_mm=300, lateral_offset_mm=offset)
                 view = vs.track_view(cfg, lane())
-                self.assertAlmostEqual(view.offset_px, 310 * offset / 300)
+                self.assertAlmostEqual(view.offset_px, 2 * view.half_px * offset / 300)
                 self.assertAlmostEqual(view.target_x, 640 + view.offset_px)
                 self.assertAlmostEqual(view.e_deg,
                                        math.degrees(math.atan2(view.offset_px, cfg.focal(1280))))
@@ -403,7 +409,7 @@ class LateralCalibrationTests(unittest.TestCase):
                 self.assertAlmostEqual(single.e_deg, both.e_deg)
                 self.assertAlmostEqual(single.offset_px, both.offset_px)
 
-    def test_invalid_new_width_clears_previous_heading_and_stops_motion(self):
+    def test_invalid_new_width_clears_previous_heading_and_switches_to_gap(self):
         cam = camera(lane())
         hd = vs.VisionHeading(vs.VisionCfg(lateral_offset_mm=50), cam)
         self.assertIsNotNone(hd.step(now=10.0))
@@ -413,11 +419,14 @@ class LateralCalibrationTests(unittest.TestCase):
         self.assertIsNone(hd.step(now=10.1))
         self.assertIsNone(hd.view)
         board = Mock()
-        board.feedback.return_value = ([0] * 4, None)
-        with patch.object(vs.time, 'time', return_value=10.1):
-            _, result = vs.vision_straight(board, hd, goal_mm=100, log=lambda _: None)
-        self.assertIn('没有可用中心线或路宽', result['reason'])
-        self.assertEqual(board.spd.call_args_list, [call(0, 0, 0, 0)])
+        board.feedback.side_effect = [([0] * 4, None), ([10] * 4, None), *[([100] * 4, None)] * 4]
+        with patch.dict(BASE, meters_per_count=0.001), \
+                patch.object(vs.time, 'time', return_value=10.1):
+            distance, result = vs.vision_straight(board, hd, goal_mm=100, log=lambda _: None)
+        self.assertEqual(distance, 100)
+        self.assertFalse(result['reason'])
+        self.assertEqual(result['heading_mode'], 'gap-blind')
+        self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
 
     def test_invalid_calibration_is_rejected_before_connecting_hardware(self):
         for params in ({'lane_width_mm': 0}, {'lane_width_mm': float('nan')},
@@ -493,17 +502,20 @@ class VanishingGeometryTests(unittest.TestCase):
         cam.update(lane(), frames=3, state="ready", now=10.3)
         self.assertIsNotNone(heading.step(now=10.3))
 
-    def test_loss_of_intersection_stops_actual_motion_loop(self):
+    def test_loss_of_intersection_switches_actual_motion_loop_to_gap(self):
         cam = camera(lane(vp_x=620))
         heading = vs.VisionHeading(vs.VisionCfg(lookahead="vanishing", gap_finish_mm=0), cam)
         self.assertIsNotNone(heading.step(now=10.0))
         cam.update(lane(left_a=0.5, right_a=0.5), frames=2, state="ready", now=10.1)
         board = Mock()
-        board.feedback.return_value = ([0] * 4, None)
-        with patch.object(vs.time, "time", return_value=10.1):
-            _, info = vs.vision_straight(board, heading, goal_mm=100, log=lambda _: None)
-        self.assertIn("没有可用灭点", info["reason"])
-        self.assertEqual(board.spd.call_args_list, [call(0, 0, 0, 0)])
+        board.feedback.side_effect = [([0] * 4, None), ([10] * 4, None), *[([100] * 4, None)] * 4]
+        with patch.dict(BASE, meters_per_count=0.001), \
+                patch.object(vs.time, "time", return_value=10.1):
+            distance, info = vs.vision_straight(board, heading, goal_mm=100, log=lambda _: None)
+        self.assertEqual(distance, 100)
+        self.assertFalse(info['reason'])
+        self.assertEqual(info['heading_mode'], 'gap-blind')
+        self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
 
     def test_actual_motion_turns_toward_vanishing_point(self):
         for vp_x, direction in ((620, 1), (660, -1)):
