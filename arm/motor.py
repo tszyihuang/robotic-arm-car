@@ -1,6 +1,6 @@
 """提取自 GIM4310_driver.py 的 RS485 V3.03b3 位置驱动。
 
-仅保留状态读取、位置/速度、梯形曲线和失能。四台电机共用同一把总线锁，
+保留状态读取、位置/速度、梯形曲线、速度环积分设置和失能。四台电机共用同一把总线锁，
 逐帧收完应答再发送下一帧，避免多台从机的应答互相碰撞。
 """
 
@@ -16,6 +16,13 @@ from .errors import MotorFault, ProtocolError
 from base.control import cleanup
 
 ANGLE_SCALE = 360.0 / 16384
+
+
+def speed_ki_bytes(value):
+    value = finite(value, "速度环 Ki")
+    if not 0 <= value <= 3.4028234663852886e38:
+        raise ValueError("速度环 Ki 必须为非负 float32 有限数")
+    return struct.pack("<f", value)
 
 
 def crc16(data):
@@ -104,6 +111,20 @@ class Motor:
         status = parse_status(self.bus.exchange(self.address, cmd, data), self.address)
         check_fault(status, self.address)
         return status
+
+    def set_speed_ki(self, value):
+        """只修改速度环 Ki；0x15 临时生效，不写入驱动器闪存。"""
+        gain = speed_ki_bytes(value)
+        original = self.bus.exchange(self.address, 0x14)
+        if len(original) != 24:
+            raise ProtocolError(f"ID{self.address}: 运动控制参数应为 24 字节，实际 {len(original)}")
+        # <ffIffI 中速度 Ki 位于偏移 16，其他增益及限幅逐字节保留。
+        desired = original[:16] + gain + original[20:]
+        # 0x14 返回已保存参数，不能回读 0x15 设置的运行参数。
+        # 恢复值即使等于保存值，也必须实际发送；以 0x15 的应答确认生效。
+        reply = self.bus.exchange(self.address, 0x15, desired)
+        if reply != desired:
+            raise ProtocolError(f"ID{self.address}: 速度环 Ki 写入应答不匹配")
 
     def disable(self):
         # 0x2E 是抱闸开关，不能当作通用使能指令。位置命令直接启动位置控制。
@@ -239,6 +260,7 @@ class SimulatedMotor:
         self.address = address
         self.angle = zero
         self.enabled = False
+        self.speed_ki = 0.005
 
     def read_status(self):
         return dict(multi_turn_deg=self.angle, fault_code=0, speed_rpm=0.0,
@@ -249,6 +271,9 @@ class SimulatedMotor:
         self.angle = angle_deg
         self.enabled = True
         return self.read_status()
+
+    def set_speed_ki(self, value):
+        self.speed_ki = struct.unpack("<f", speed_ki_bytes(value))[0]
 
     def disable(self):
         self.enabled = False

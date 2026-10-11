@@ -110,6 +110,13 @@ class TargetLockTaskTests(unittest.TestCase):
             return target_sample(frame, index, clock.wall())
 
         vision.wait_target_layout.side_effect = next_frame
+        original_disable = arm.disable
+
+        def disable_after_restore():
+            for addr in (1, 4):
+                self.assertAlmostEqual(bus.motors[addr].speed_ki, 0.005)
+            return original_disable()
+
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "tasks.txt"
             path.write_text("[打靶测试]\nlock-target-left\narm-disable\n", encoding="utf-8")
@@ -119,7 +126,7 @@ class TargetLockTaskTests(unittest.TestCase):
                     patch("tasks.lock_target.wait_cancelable", clock.wait), \
                     patch("tasks.lock_target.TargetLockWeb", return_value=web), \
                     patch("tasks.lock_target.AimPoint", return_value=aim), \
-                    patch("tasks.runner.pause"), patch.object(arm, "disable", wraps=arm.disable) as disable, \
+                    patch("tasks.runner.pause"), patch.object(arm, "disable", side_effect=disable_after_restore) as disable, \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 main.run(Mock(), arm, vision, section="打靶测试", tasks_path=path)
         self.assertEqual(clock.now, 3)

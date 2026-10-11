@@ -1,5 +1,6 @@
 """彩色靶锁定、PID 方向和模拟两轴闭环；不连接硬件。"""
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
+import io
 import signal
 import struct
 import threading
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from arm.config import ArmConfig, JOINT_IDS
+from arm.errors import ProtocolError
 from arm.motor import ANGLE_SCALE, SimulatedBus, position_payload
 from base.control import MotionCancelled
 from config import ARM
@@ -204,6 +206,119 @@ class TargetLockRunHarness(unittest.TestCase):
 
         camera.next_frame.side_effect = next_frame
         return camera
+
+
+class DriverIntegralRunTests(TargetLockRunHarness):
+    def setUp(self):
+        super().setUp()
+        for motor in self.bus.motors.values():
+            motor.set_speed_ki = Mock(wraps=motor.set_speed_ki)
+
+    def assert_idle_integrals(self):
+        for motor in self.bus.motors.values():
+            self.assertAlmostEqual(motor.speed_ki, 0.005)
+        for addr in (2, 3):
+            self.bus.motors[addr].set_speed_ki.assert_not_called()
+
+    def test_high_integral_is_active_before_aiming_and_restored_after_completion(self):
+        camera = self.scripted_camera([(scene(x=160, y=120), i, 0) for i in range(1, 7)])
+        next_frame = camera.next_frame.side_effect
+
+        def check_integrals(**kwargs):
+            for addr in (1, 4):
+                self.assertAlmostEqual(self.bus.motors[addr].speed_ki, 0.05)
+            for addr in (2, 3):
+                self.assertAlmostEqual(self.bus.motors[addr].speed_ki, 0.005)
+            return next_frame(**kwargs)
+
+        camera.next_frame.side_effect = check_integrals
+        result = run(camera, self.bus, config={"hz": 2, "stable_frames": 1},
+                     complete_after=2, log=lambda _: None)
+        self.assertTrue(result["ok"])
+        self.assert_idle_integrals()
+        for addr in (1, 4):
+            self.assertEqual([call.args[0] for call in self.bus.motors[addr].set_speed_ki.call_args_list],
+                             [0.05, 0.005])
+
+    def test_duration_and_alignment_timeout_restore_integrals(self):
+        for complete_after in (0, 2):
+            with self.subTest(complete_after=complete_after):
+                camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 10)])
+                if complete_after:
+                    with self.assertRaisesRegex(TimeoutError, "锁靶超时"):
+                        run(camera, self.bus, duration=0.03, complete_after=complete_after,
+                            log=lambda _: None)
+                else:
+                    run(camera, self.bus, duration=0.03, log=lambda _: None)
+                self.assert_idle_integrals()
+
+    def test_cancellation_and_runtime_errors_restore_integrals_and_keep_original_error(self):
+        for error in (KeyboardInterrupt(), MotionCancelled("取消"), RuntimeError("识别失败")):
+            with self.subTest(error=error):
+                camera = Mock()
+                camera.next_frame.side_effect = error
+                with self.assertRaises(type(error)) as failed:
+                    run(camera, self.bus, log=lambda _: None)
+                self.assertIs(failed.exception, error)
+                self.assert_idle_integrals()
+
+    def test_partial_startup_failure_restores_both_attempted_axes(self):
+        setter = self.bus.motors[4].set_speed_ki._mock_wraps
+
+        def fail_after_write(value):
+            setter(value)
+            if value == 0.05:
+                raise ProtocolError("参数已生效，但应答超时")
+
+        self.bus.motors[4].set_speed_ki.side_effect = fail_after_write
+        camera = Mock()
+        with self.assertRaisesRegex(ProtocolError, "应答超时"):
+            run(camera, self.bus, log=lambda _: None)
+        camera.next_frame.assert_not_called()
+        self.assert_idle_integrals()
+
+    def test_position_hold_failure_still_restores_integrals(self):
+        camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 10)])
+        with patch("tasks.lock_target.hold", side_effect=ProtocolError("保持失败")):
+            with self.assertRaisesRegex(ProtocolError, "保持失败"):
+                run(camera, self.bus, duration=0.03, log=lambda _: None)
+        self.assert_idle_integrals()
+
+    def test_one_restore_failure_retries_and_does_not_skip_the_other_axis(self):
+        setter = self.bus.motors[1].set_speed_ki._mock_wraps
+
+        def fail_restore(value):
+            if value == 0.005:
+                raise ProtocolError("ID1 恢复失败")
+            setter(value)
+
+        self.bus.motors[1].set_speed_ki.side_effect = fail_restore
+        camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 10)])
+        with redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaisesRegex(ProtocolError, "ID1 恢复失败"):
+                run(camera, self.bus, duration=0.03, log=lambda _: None)
+        self.assertEqual([call.args[0] for call in self.bus.motors[1].set_speed_ki.call_args_list],
+                         [0.05, 0.005, 0.005, 0.005])
+        self.assertAlmostEqual(self.bus.motors[4].speed_ki, 0.005)
+        self.assertIn("ID1 速度环 Ki 恢复", errors.getvalue())
+
+    def test_ctrl_c_during_restore_retries_then_propagates_after_both_axes_are_restored(self):
+        setter = self.bus.motors[1].set_speed_ki._mock_wraps
+        interrupted = False
+
+        def interrupt_restore_once(value):
+            nonlocal interrupted
+            if value == 0.005 and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            setter(value)
+
+        self.bus.motors[1].set_speed_ki.side_effect = interrupt_restore_once
+        camera = self.scripted_camera([(scene(), i, 0) for i in range(1, 10)])
+        with self.assertRaises(KeyboardInterrupt):
+            run(camera, self.bus, duration=0.03, log=lambda _: None)
+        self.assert_idle_integrals()
+        self.assertEqual(self.bus.motors[1].set_speed_ki.call_count, 3)
 
 
 class AcquisitionRunTests(TargetLockRunHarness):

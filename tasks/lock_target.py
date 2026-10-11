@@ -11,6 +11,7 @@ if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arm.config import ArmConfig, JOINT_IDS, finite
+from arm.errors import ProtocolError
 from arm.motor import ANGLE_SCALE, MotorBus, check_fault, position_payload
 from base.control import MotionCancelled, check_cancel, clamp, cleanup, wait_cancelable
 from config import ARM, TARGET_LOCK, VISION
@@ -21,7 +22,9 @@ from vision.targets import candidates_from_detections
 
 TARGETS = ("middle", "left", "right", "red", "green", "blue")
 AXES = (1, 4)
-TASK_TOLERANCE_PX = 8.0
+TRACKING_SPEED_KI = 0.05
+IDLE_SPEED_KI = 0.005
+TASK_TOLERANCE_PX = 5.0
 TASK_STABLE_SECONDS = 2.0
 WAIT_JOINTS = {1: -90.0, 2: 0.0, 3: 160.0, 4: 4.0}
 
@@ -207,6 +210,30 @@ def hold(bus, addresses=AXES):
     cleanup(*[(f"ID{addr} 保持当前位置", lambda addr=addr: hold_axis(addr)) for addr in addresses])
 
 
+def restore_speed_integral(bus, addresses):
+    """恢复两个轴时分别尝试；临时参数写入可重试，取消不跳过恢复。"""
+    interrupted = False
+
+    def restore_axis(addr):
+        nonlocal interrupted
+        for attempt in range(3):
+            try:
+                bus.motors[addr].set_speed_ki(IDLE_SPEED_KI)
+                return
+            except KeyboardInterrupt:
+                interrupted = True
+                if attempt == 2:
+                    raise
+            except (OSError, ProtocolError):
+                if attempt == 2:
+                    raise
+
+    cleanup(*[(f"ID{addr} 速度环 Ki 恢复为 {IDLE_SPEED_KI:g}",
+               lambda addr=addr: restore_axis(addr)) for addr in addresses])
+    if interrupted:
+        raise KeyboardInterrupt
+
+
 class RecoveryPose:
     """发送一次四轴复位命令，逐拍确认到位；等待期间不会被 PID 覆盖。"""
 
@@ -271,6 +298,7 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
     previous_state, next_log = None, start
     aligned_since = aligned_stamp = aligned_aim = None
     recovery = None
+    driver_axes = []
     try:
         check_cancel(stop_event)
         if candidate_source is None and predictor is None:
@@ -278,6 +306,12 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
         recovery = RecoveryPose(bus, arm_config, encoder_zero, stop_event)
         if encoder_zero is None and recovery.config.encoder_zero_deg is None:
             log("无已有编码器零点：记录启动姿态作为 arm-move -90 0 160 4 的复位位置")
+        for addr in AXES:
+            check_cancel(stop_event)
+            # 超时或中断可能发生在参数已生效但应答尚未收全时，仍须恢复该轴。
+            driver_axes.append(addr)
+            bus.motors[addr].set_speed_ki(TRACKING_SPEED_KI)
+        log(f"瞄准期间 ID1/ID4 速度环 Ki={TRACKING_SPEED_KI:g}，结束后恢复 {IDLE_SPEED_KI:g}")
         while not duration or time.monotonic() - start < duration:
             check_cancel(stop_event)
             tick = time.monotonic()
@@ -410,7 +444,10 @@ def run(camera, bus, target="middle", *, config=None, duration=0.0, stop_event=N
             raise TimeoutError(f"锁靶超时：未在 {duration:g}s 内达到横纵误差均 ≤ "
                                f"{complete_tolerance_px:g}px 并连续保持 {complete_after:g}s")
     finally:
-        hold(bus, JOINT_IDS if recovery is not None and recovery.active else AXES)
+        try:
+            hold(bus, JOINT_IDS if recovery is not None and recovery.active else AXES)
+        finally:
+            restore_speed_integral(bus, driver_axes)
 
 
 def run_task(arm, vision, target="middle", *, config=None, duration=0.0,
@@ -432,7 +469,8 @@ def run_task(arm, vision, target="middle", *, config=None, duration=0.0,
         log(f"lock_target.run(target={target!r})  # {end}；"
             f"使用项目 YOLO，先连续 {cfg['stable_frames']} 帧确认三色标靶，"
             "丢靶复位 arm-move -90 0 160 4；"
-            f"ID2 保持 {cfg['motor2_angle_deg']:g}°，ID1/ID4 PID 跟踪，开启校正网页")
+            f"ID2 保持 {cfg['motor2_angle_deg']:g}°，ID1/ID4 PID 跟踪，"
+            f"速度环 Ki 临时设为 {TRACKING_SPEED_KI:g}，结束恢复 {IDLE_SPEED_KI:g}，开启校正网页")
         return None
 
     web = bus = None

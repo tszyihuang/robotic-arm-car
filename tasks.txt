@@ -11,7 +11,7 @@ straight 0.7     #过减速带
 calibrate-position  #过减速带后校准
 turn 44 0.24
 turn 44 0
-straight 0.50  #视觉校准1
+straight 0.52  #视觉校准1
 turn -87 0.36
 straight 0.30
 turn -87 0.36
@@ -23,24 +23,25 @@ calibrate-ball-position   #小球任务点校准
 小球任务                  # 第一位颜色匹配 detect-balls 的排列，调用对应抓球段
 
 home
-arm-disable
+
 vision-straight 1.76  #跑直线
 
 arm-move -90 0 160 4
 detect-targets        #识别标靶
 打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
+home
 
-straight 0.13
-turn -87 0.43
-vision-straight 0.67
-arm-calibrate
+straight 0.22
+turn -87 0.40
+vision-straight 0.6
+
 arm-move -90 0 102 91
 calibrate-object-position   #人质任务点校准
 人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
 
 home
 arm-disable
-vision-straight 1.55
+vision-straight 1.65
 
 
 [抓中间的小球]

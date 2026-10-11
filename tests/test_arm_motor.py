@@ -128,6 +128,57 @@ class MotorBusTests(unittest.TestCase):
                     bus.exchange(1, command)
                 self.assertEqual(len(serial_port.writes), 1)
 
+    def test_speed_integral_change_is_volatile_and_preserves_every_other_parameter(self):
+        original = struct.pack("<ffIffI", 4.0, 0.01, 987, 0.35, 0.005, 4321)
+        desired = original[:16] + struct.pack("<f", 0.05) + original[20:]
+        bus, serial_port = self.make_bus([
+            lambda request: response(request, original),
+            lambda request: response(request, request[5:-2]),
+        ])
+        bus.motors[4].set_speed_ki(0.05)
+        self.assertEqual([frame[3] for frame in serial_port.writes], [0x14, 0x15])
+        self.assertTrue(all(frame[2] == 4 for frame in serial_port.writes))
+        self.assertEqual(serial_port.writes[1][5:-2], desired)
+
+    def test_saved_parameter_reads_do_not_prevent_runtime_change_or_restoration(self):
+        saved = struct.pack("<ffIffI", 4.0, 0.0, 1000, 0.3, 0.005, 82498)
+        runtime = saved
+
+        def driver(request):
+            nonlocal runtime
+            if request[3] == 0x14:
+                return response(request, saved)
+            self.assertEqual(request[3], 0x15)
+            runtime = request[5:-2]
+            return response(request, runtime)
+
+        bus, serial_port = self.make_bus([driver] * 4)
+        bus.motors[1].set_speed_ki(0.05)
+        self.assertAlmostEqual(struct.unpack_from("<f", runtime, 16)[0], 0.05)
+        self.assertNotEqual(runtime, saved)
+        bus.motors[1].set_speed_ki(0.005)
+        self.assertEqual(runtime, saved)
+        self.assertEqual([frame[3] for frame in serial_port.writes], [0x14, 0x15, 0x14, 0x15])
+
+    def test_invalid_speed_integral_is_rejected_before_any_io(self):
+        bus, serial_port = self.make_bus([])
+        for gain in (-1, True, "0.05", float("nan"), float("inf"), 1e39):
+            with self.subTest(gain=gain), self.assertRaises(ValueError):
+                bus.motors[1].set_speed_ki(gain)
+        self.assertFalse(serial_port.writes)
+
+    def test_malformed_driver_parameters_cannot_be_written(self):
+        bus, serial_port = self.make_bus([lambda request: response(request, bytes(22))])
+        with self.assertRaisesRegex(ProtocolError, "参数应为 24 字节"):
+            bus.motors[1].set_speed_ki(0.05)
+        self.assertEqual([frame[3] for frame in serial_port.writes], [0x14])
+
+    def test_speed_integral_rejects_mismatched_write_ack(self):
+        original = struct.pack("<ffIffI", 4.0, 0.0, 1000, 0.3, 0.005, 82498)
+        bus, _ = self.make_bus([lambda request: response(request, original)] * 2)
+        with self.assertRaisesRegex(ProtocolError, "应答不匹配"):
+            bus.motors[1].set_speed_ki(0.05)
+
     @unittest.skipUnless(os.name == "posix", "串口独占使用 POSIX 锁")
     def test_second_bus_cannot_open_the_same_serial_device(self):
         master, slave = os.openpty()
