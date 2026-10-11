@@ -22,7 +22,8 @@ BASE = {
 STRAIGHT = {
     "FORWARD_SIGN": (1, 1, 1, 1), "TRACK_MM": 190.0,
     "SPEED_CRUISE": 100.0, "SPEED_MIN": 60.0, "SPEED_LIMIT": 1000.0,
-    "ACCEL": 300.0, "MARGIN_MM": 1.0, "KP_POS": 2.0, "TRIM_MAX": 100.0,
+    # ACCEL 为加减速参考限值（mm/s²）；KP_POS 越大，越晚开始按剩余距离降速。
+    "ACCEL": 600.0, "MARGIN_MM": 5.0, "KP_POS": 4.0, "TRIM_MAX": 100.0,
     "KP_GAP": 0.30, "KI_GAP": 0.20, "KD_GAP": 0.45, "GAP_DEV_MAX": 300.0,
     "KP_SPD": 0.60, "KI_SPD": 0.80, "CORR_MAX": 40.0,
     "BRAKE_TAU": 0.12, "TEP_WINDOW": 0.010, "SPD_SAMPLES": 3,
@@ -31,12 +32,13 @@ STRAIGHT = {
 TURN = {
     # 圆弧原算法独立使用 6379 count/m；本次不重新标定。
     "COUNTS_PER_METER": 6379.0, "LOOP_HZ": 100.0,
-    "MAX_WHEEL_SPEED": 0.45, "ACCEL": 0.3, "ANGULAR_ACCEL": 3.0,
-    "ANGLE_KP": 1.5, "PATH_KP": 8.0, "PATH_KD": 1.5, "RATE_KP": 0.5,
+    # 线加减速 m/s²、角加减速 rad/s²；ANGLE_KP 控制接近目标时的减速速度曲线。
+    "MAX_WHEEL_SPEED": 0.45, "ACCEL": 0.6, "ANGULAR_ACCEL": 6.0,
+    "ANGLE_KP": 3.0, "PATH_KP": 8.0, "PATH_KD": 1.5, "RATE_KP": 0.5,
     "WHEEL_SPEED_KP": 0.6, "BRAKE_LEAD_SECONDS": 0.02,
-    "BRAKE_KP": 3000.0, "STOP_ANGLE_DEG": 0.6, "SETTLE_SECONDS": 0.25,
+    "BRAKE_KP": 3000.0, "STOP_ANGLE_DEG": 2, "SETTLE_SECONDS": 0.25,
     # 仅原地转向使用：轮速单位 m/s；50 mm/s 为待实车确认的收尾下限。
-    "SPIN_MIN_WHEEL_SPEED": 0.05, "SPIN_STOP_ANGLE_DEG": 1.0,
+    "SPIN_MIN_WHEEL_SPEED": 0.05, "SPIN_STOP_ANGLE_DEG": 2.0,
     "SPIN_BRAKE_LEAD_SECONDS": 0.04,
     "LOG_DIR": ROOT / "logs" / "turn",  # 每次转弯保存 CSV；None 关闭。
 }

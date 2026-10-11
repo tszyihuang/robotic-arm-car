@@ -23,6 +23,7 @@ class PlannerTests(unittest.TestCase):
             self.assertGreater(min(left, right), 0)
             self.assertLess(min(left, right), .07)
 
+    @patch.object(arc, 'SPIN_STOP_ANGLE', math.radians(1.0))
     def test_in_place_turn_keeps_movable_speed_near_target(self):
         for sign in (-1, 1):
             p = arc.make_plan(0, sign * 45, .25, None, .41)
@@ -35,6 +36,7 @@ class PlannerTests(unittest.TestCase):
             self.assertGreaterEqual(abs(right), arc.SPIN_MIN_WHEEL_SPEED)
             self.assertLess(abs(right), .07)
 
+    @patch.object(arc, 'SPIN_STOP_ANGLE', math.radians(1.0))
     def test_spin_floor_respects_lower_speed_limit_and_brakes_in_both_directions(self):
         for sign in (-1, 1):
             p = arc.make_plan(0, sign * 44, .25, .03, .41)
@@ -180,6 +182,9 @@ class TurnCompletionTests(unittest.TestCase):
         board.release.assert_called_once()
         return result, board
 
+    # 固定可重现低速死区的增益与停车窗口，避免现场调参改变测试场景。
+    @patch.object(arc, 'ANGLE_KP', 1.5)
+    @patch.object(arc, 'SPIN_STOP_ANGLE', math.radians(1.0))
     def test_spin_finishes_with_motor_dead_zone_for_both_directions_and_heading_sources(self):
         for sign in (-1, 1):
             for use_imu in (False, True):
