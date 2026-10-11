@@ -1,5 +1,5 @@
 [主线]
-straight 0.3
+straight 0.31
 arm-calibrate            # 扫码姿态前建立机械臂软件基准
 arm-move 6 0 160 1
 scan-qrcode    # 三位任务码：排爆物颜色、反恐靶颜色、救援目标形状
@@ -11,10 +11,10 @@ straight 0.7     #过减速带
 calibrate-position  #过减速带后校准
 turn 44 0.24
 turn 44 0
-straight 0.52  #视觉校准1
-turn -88 0.36
-straight 0.28
-turn -88 0.36
+vision-straight 0.5  #视觉校准1
+turn -87 0.36
+vision-straight 0.30
+turn -87 0.36
 vision-straight 0.35
 arm-calibrate
 arm-move -90 55 74 89

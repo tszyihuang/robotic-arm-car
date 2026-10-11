@@ -2,7 +2,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-STEP_GAP = 0.2  # 沿用任务表每步间隔；干跑不等待。
+STEP_GAP = 0.5  # 沿用任务表每步间隔；干跑不等待。
 
 BASE = {
     "motor_port": "",  # 留空自动识别；实机建议填稳定串口路径。
