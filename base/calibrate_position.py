@@ -16,7 +16,7 @@ FEEDBACK_STALE = BASE["feedback_stale"]
 POLL_INTERVAL = POSITION["poll_interval"]
 
 
-def calibrate_position(board, imu, speed=straight.SPEED_CRUISE,
+def calibrate_position(board, imu, speed=POSITION["speed"],
                        max_distance_mm=MAX_DISTANCE_MM, timeout=TIMEOUT,
                        accel=straight.ACCEL, kp_gap=straight.KP_GAP,
                        ki_gap=straight.KI_GAP, kd_gap=straight.KD_GAP,
@@ -81,7 +81,7 @@ def calibrate_position(board, imu, speed=straight.SPEED_CRUISE,
             now = time.monotonic()
             # 撞击优先判断，即使驱动板此时没有反馈，也能立即退出并断速。
             if state.hit:
-                ok, reason = True, f"检测到加速度突变（峰值 {state.peak:.1f} 原始计数），已停车并解锁电机"
+                ok, reason = True, f"检测到加速度突变（峰值 {state.peak:.1f} 原始计数），已停车并失能底盘四轮电机（零 PWM）"
                 break
             if state.age >= IMU_STALE:
                 reason = "IMU 原始加速度断流，已停车"
@@ -149,6 +149,8 @@ def calibrate_position(board, imu, speed=straight.SPEED_CRUISE,
         run_log.row(time.monotonic() - started, dist, gap, v_l, v_r,
                     '', 0, 0, *state.acc, state.delta, state.peak, state.hit)
         check_cancel(stop_event)
+        if ok:
+            log(f"  {reason}")
         return {'ok': ok, 'reason': reason, 'dist_mm': dist, 'gap_mm': gap,
                 'impact_peak_raw': state.peak, 'elapsed': time.monotonic() - started}
     finally:

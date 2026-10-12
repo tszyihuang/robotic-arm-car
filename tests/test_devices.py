@@ -3,8 +3,11 @@ import contextlib
 import io
 import struct
 import threading
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
+
+import serial
 
 from arm.api import Arm
 from base.api import Base
@@ -27,6 +30,7 @@ class DeviceConstructionTests(unittest.TestCase):
                 motor.stop_event = threading.Event()
                 motor.lock = threading.RLock()
                 motor.thread = None
+                motor._released = False
                 motor.board = Mock()
                 base.motor = motor
                 base.close(release_motors=release_motors)
@@ -122,6 +126,86 @@ class DeviceConstructionTests(unittest.TestCase):
             self.assertTrue(all(not m.enabled for m in arm._bus.motors.values()))
         finally:
             arm.close()
+
+
+class SerialWriteTests(unittest.TestCase):
+    def test_timed_out_speed_command_preserves_error_and_is_not_replayed(self):
+        board = SerialBoard.__new__(SerialBoard)
+        board.ser = Mock(port="/fake", write_timeout=1.0)
+        original = serial.SerialTimeoutException("Write timeout")
+        board.ser.write.side_effect = original
+        with self.assertRaises(serial.SerialTimeoutException) as failed:
+            board.spd(100, 100, 200, 200)
+        self.assertIs(failed.exception.__cause__, original)
+        self.assertIn("/fake", str(failed.exception))
+        self.assertIn("write_timeout=1.0s", str(failed.exception))
+        self.assertIn("spd:100,100,200,200", str(failed.exception))
+        board.ser.write.assert_called_once_with(b"$spd:100,100,200,200#\r\n")
+        board.ser.flush.assert_not_called()
+
+    def test_partial_speed_command_is_rejected_without_replay(self):
+        board = SerialBoard.__new__(SerialBoard)
+        board.ser = Mock()
+        board.ser.write.side_effect = lambda data: len(data) - 1
+        with self.assertRaisesRegex(RuntimeError, "电机指令未完整发送"):
+            board.spd(100, 100, 200, 200)
+        board.ser.write.assert_called_once()
+        board.ser.flush.assert_not_called()
+
+
+class MotorOutputTests(unittest.TestCase):
+    def setUp(self):
+        self.motor = Motor.__new__(Motor)
+        self.motor.shutdown = threading.Event()
+        self.motor.stop_event = threading.Event()
+        self.motor.lock = threading.Lock()
+        self.motor.thread = None
+        self.motor._released = False
+        self.motor.default_timeout = 0.08
+        self.motor.board = Mock()
+
+    def test_release_survives_task_stop_and_connection_close(self):
+        base = Base()
+        base.motor = self.motor
+        self.motor.release()
+        base.stop()
+        base.close(release_motors=False)
+        self.motor.board.spd.assert_not_called()
+        self.assertTrue(self.motor._released)
+        self.assertEqual(self.motor.board._send.call_args_list,
+                         [call("pwm:0,0,0,0")] * 3)
+        self.motor.board.ser.close.assert_called_once()
+
+    def test_next_movement_restores_drive_and_zero_speed_hold(self):
+        self.motor.release()
+        self.motor.speed((0.1, 0.1, 0.2, 0.2))
+        self.assertFalse(self.motor._released)
+        self.motor.stop()
+        self.motor.close(release_motors=False)
+        self.assertEqual(self.motor.board.spd.call_args_list,
+                         [call(100.0, 100.0, 200.0, 200.0), call(0, 0, 0, 0), call(0, 0, 0, 0)])
+        self.motor.board._send.assert_called_once_with("pwm:0,0,0,0")
+
+    def test_position_impact_releases_wheels_through_task_cleanup(self):
+        base = Base()
+        base.motor, base.imu, base._imu_checked = self.motor, Mock(), True
+        self.motor.feedback = Mock(side_effect=[([0] * 4, None), ([-1] * 4, [-1] * 4)])
+        fresh = SimpleNamespace(age=0.0, hit=False, peak=0.0, acc=(0, 0, 0), delta=0.0)
+        impact = SimpleNamespace(age=0.0, hit=True, peak=200.0, acc=(200, 0, 0), delta=200.0)
+        base.imu.accel_state.side_effect = [fresh, fresh, fresh, impact]
+        with patch("base.calibrate_position.wait_cancelable"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            result = base.calibrate_position()
+        self.assertTrue(result["ok"])
+        self.assertIn("失能底盘四轮", output.getvalue())
+        self.assertTrue(self.motor._released)
+        self.assertTrue(any(any(value < 0 for value in command.args)
+                            for command in self.motor.board.spd.call_args_list))
+        base.stop()
+        base.close(release_motors=False)
+        commands = self.motor.board.mock_calls
+        released_at = commands.index(call._send("pwm:0,0,0,0"))
+        self.assertFalse(any(command[0] == "spd" for command in commands[released_at:]))
 
 
 class EncoderTests(unittest.TestCase):

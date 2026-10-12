@@ -21,7 +21,7 @@ class Arm:
         self._bus = bus if bus is not None else (
             SimulatedBus(self.config) if simulate else MotorBus(
                 self.config.port, self.config.baudrate, self.config.serial_timeout,
-                latency_ms=self.config.serial_latency_ms))
+                latency_ms=self.config.serial_latency_ms, write_timeout=self.config.serial_write_timeout))
         try:
             if set(self._bus.motors) != set(JOINT_IDS):
                 raise ValueError("总线必须包含且仅包含电机 ID1-4")

@@ -531,7 +531,7 @@ def main(args=None):
         predictor = load_predictor(device=opts.device, threshold=opts.conf)
         camera = CameraStream(opts.camera)
         bus = MotorBus(arm_cfg.port, arm_cfg.baudrate, arm_cfg.serial_timeout,
-                       latency_ms=arm_cfg.serial_latency_ms)
+                       latency_ms=arm_cfg.serial_latency_ms, write_timeout=arm_cfg.serial_write_timeout)
         web.start(camera)
         print(f"YOLO 锁靶选择：{opts.target}；模型 {VISION['objects_weights']}；"
               f"PID Kp={cfg['kp']:g} Ki={cfg['ki']:g} Kd={cfg['kd']:g}。"

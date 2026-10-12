@@ -1,5 +1,6 @@
 """驱动板串口：速度指令、累计编码器和轮速反馈，单位 mm/s。"""
 import glob
+import math
 import re
 import threading
 import time
@@ -18,9 +19,13 @@ class SerialBoard:
     _RE_MTEP = re.compile(rb"\$MTEP:(-?\d+),(-?\d+),(-?\d+),(-?\d+)#")
     _RE_BATTERY = re.compile(rb"\$[Bb]attery:([^#]+)#")
 
-    def __init__(self, port, baud=BAUD):
+    def __init__(self, port, baud=BAUD, *, write_timeout=None):
+        write_timeout = BASE["write_timeout"] if write_timeout is None else write_timeout
+        if (isinstance(write_timeout, bool) or not isinstance(write_timeout, (int, float))
+                or not math.isfinite(write_timeout) or write_timeout <= 0):
+            raise ValueError("底盘串口 write_timeout 必须为有限正数（秒）")
         # timeout=0 → 非阻塞读，控制环靠"读干净为止"取最新值，延迟最低
-        self.ser = serial.Serial(port, baud, timeout=0, write_timeout=0.2)
+        self.ser = serial.Serial(port, baud, timeout=0, write_timeout=write_timeout)
         self._feedback_buf = b""
         self.battery = None
         try:
@@ -32,7 +37,13 @@ class SerialBoard:
 
     def _send(self, cmd):
         data = ("$" + cmd + "#\r\n").encode("ascii")
-        if self.ser.write(data) != len(data):
+        try:
+            written = self.ser.write(data)
+        except serial.SerialTimeoutException as exc:
+            raise serial.SerialTimeoutException(
+                f"底盘串口写入超时（端口 {self.ser.port}，"
+                f"write_timeout={self.ser.write_timeout}s，指令 {cmd}）：{exc}") from exc
+        if written != len(data):
             raise RuntimeError("电机指令未完整发送")
         self.ser.flush()
 
@@ -114,7 +125,7 @@ def find_motor_port(baud=BAUD, stop_event=None):
 class Motor:
     """独占驱动板串口，后台采集；控制循环每帧只消费一次增量。"""
 
-    def __init__(self, port="", *, stop_event=None):
+    def __init__(self, port="", *, stop_event=None, write_timeout=None):
         self.stop_event = stop_event or threading.Event()
         self.shutdown = threading.Event()
         self.lock = threading.Lock()
@@ -128,12 +139,13 @@ class Motor:
         self.counts = None
         self.stamp = 0.0
         self.thread = None
+        self._released = False
         self.default_timeout = BASE['feedback_timeout']
         check_cancel(self.stop_event)
         port = port or find_motor_port(stop_event=self.stop_event)
         if not port:
             raise RuntimeError("找不到电机驱动板，请设置 config.py 的 BASE['motor_port']")
-        self.board = SerialBoard(port)
+        self.board = SerialBoard(port, write_timeout=write_timeout)
         try:
             check_cancel(self.stop_event)
             self.board.stop()
@@ -217,6 +229,7 @@ class Motor:
             if self.stop_event.is_set():
                 wheels = (0, 0, 0, 0)
             self.board.spd(*wheels)
+            self._released = False
 
     def speed(self, wheels):
         self.spd(*(value * 1000 for value in wheels))
@@ -225,7 +238,9 @@ class Motor:
         with self.lock:
             if self.stop_event.is_set():
                 wheels = (0, 0, 0, 0)
-            self.board._send("pwm:%d,%d,%d,%d" % tuple(wheels))
+            wheels = tuple(wheels)
+            self.board._send("pwm:%d,%d,%d,%d" % wheels)
+            self._released = not any(wheels)
 
     def brake(self, speeds):
         duties = tuple(round(max(-1000, min(1000, -TURN["BRAKE_KP"] * value)))
@@ -234,13 +249,19 @@ class Motor:
         return duties
 
     def stop(self):
-        self.spd(0, 0, 0, 0)
+        """停车；已零 PWM 释放时保持失能，避免清理重新开启零速闭环。"""
+        with self.lock:
+            if self._released:
+                self.board._send("pwm:0,0,0,0")
+            else:
+                self.board.spd(0, 0, 0, 0)
 
     def release(self):
+        """四轮零 PWM，退出速度闭环并释放驱动力；后续速度指令恢复闭环。"""
         self.pwm((0, 0, 0, 0))
 
     def close(self, *, release_motors=True):
-        """关闭采集和串口；release_motors=False 保留零速度闭环。"""
+        """关闭采集和串口；release_motors=False 保留当前停车／释放状态。"""
         self.shutdown.set()
         actions = []
         if self.thread is not None:

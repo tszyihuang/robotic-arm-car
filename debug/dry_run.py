@@ -14,9 +14,9 @@ class DryBase:
         print(f"base.turn({degrees:g}°, R={radius:g} m, {speed:g} mm/s)")
 
     def calibrate_position(self):
-        print(f"base.calibrate_position(speed={BASE['speed']:g} mm/s, "
+        print(f"base.calibrate_position(speed={POSITION['speed']:g} mm/s, "
               f"max_distance={POSITION['max_distance_m']:g} m, timeout={POSITION['timeout']:g} s, "
-              f"impact_threshold={POSITION['impact_threshold']:g})")
+              f"impact_threshold={POSITION['impact_threshold']:g})  # 撞击后停车并零 PWM 失能底盘四轮")
 
     def align(self, vision):
         print(f"base.align(vision, spin_speed={ALIGN['SPIN_SPEED']:g} mm/s, "

@@ -7,7 +7,8 @@ STEP_GAP = 0.05  # 沿用任务表每步间隔；干跑不等待。
 BASE = {
     "motor_port": "",  # 留空自动识别；实机建议填稳定串口路径。
     "baudrate": 115200,
-    "speed": 300.0,
+    "write_timeout": 1.0,  # 底盘串口单次写入最长等待秒数；原为固定 0.2 s。
+    "speed": 300.0,  # 普通直走／视觉直走共用速度，mm/s；倒车校准独立配置。
     "turn_speed": 250.0,
     "turn_spin_speed": 150.0,
     "turn_radius": 0.3,
@@ -44,6 +45,7 @@ TURN = {
 }
 
 POSITION = {
+    "speed": 200.0,  # calibrate-position 倒车靠坎速度，mm/s，填写正数。
     "impact_threshold": 150.0, "max_distance_m": 1.0, "timeout": 20.0,
     "boot_wait": 0.0, "poll_interval": 0.005,
 }
@@ -98,6 +100,7 @@ ALIGN = {
 ARM = {
     "port": "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBVQPDL-if00-port0",
     "baudrate": 921600, "serial_timeout": 0.1, "serial_latency_ms": 1,
+    "serial_write_timeout": 1.0,  # RS485 写入上限秒数；应答等待由 serial_timeout 单独控制。
     "joint_signs": {1: 1, 2: 1, 3: -1, 4: 1},
     "joint_offsets_deg": {1: 0.0, 2: 0.0, 3: 160.0, 4: 24.0},
     "encoder_zero_deg": None, "speed_rpm": 10.0,

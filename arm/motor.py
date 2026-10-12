@@ -132,17 +132,22 @@ class Motor:
 
 
 class MotorBus:
-    def __init__(self, port, baudrate=921600, timeout=0.1, serial_port=None, *, latency_ms=1):
+    def __init__(self, port, baudrate=921600, timeout=0.1, serial_port=None, *, latency_ms=1,
+                 write_timeout=1.0):
         self.timeout = finite(timeout, "串口超时")
         if self.timeout <= 0:
             raise ValueError("串口超时必须大于 0")
+        self.write_timeout = finite(write_timeout, "串口写入超时")
+        if self.write_timeout <= 0:
+            raise ValueError("串口写入超时必须大于 0")
+        self.port = port
         self._lock = threading.Lock()
         self._seq = 0
         self._closed = False
         if serial_port is None:
             import serial  # 仿真和纯运动学不依赖 pyserial。
-            serial_port = serial.Serial(port, baudrate=baudrate, timeout=min(timeout, 0.02),
-                                        write_timeout=timeout, bytesize=8, parity="N", stopbits=1,
+            serial_port = serial.Serial(port, baudrate=baudrate, timeout=min(self.timeout, 0.02),
+                                        write_timeout=self.write_timeout, bytesize=8, parity="N", stopbits=1,
                                         exclusive=True)
         self._ser = serial_port
         try:
@@ -151,6 +156,23 @@ class MotorBus:
         except BaseException:
             cleanup(('四轴串口连接', serial_port.close))
             raise
+
+    def _write_frame(self, frame):
+        started = time.monotonic()
+        try:
+            written = self._ser.write(frame)
+        except OSError as exc:
+            from serial import SerialTimeoutException
+            if not isinstance(exc, SerialTimeoutException):
+                raise  # 设备断开等传输错误立即退出，不能当作应答超时重试。
+            elapsed_ms = (time.monotonic() - started) * 1000
+            port = getattr(self._ser, "port", None) or self.port
+            limit = getattr(self._ser, "write_timeout", self.write_timeout)
+            # 转成协议异常，使无副作用的 0x0B 查询可有界重试；其他指令仍只发一次。
+            raise ProtocolError(f"RS485 写入超时（端口 {port}，write_timeout={limit}s，"
+                                f"耗时 {elapsed_ms:.1f}ms，帧长 {len(frame)} 字节）：{exc}") from exc
+        if written != len(frame):
+            raise ProtocolError("串口未完整发送命令")
 
     def _read_response(self, address, cmd, deadline):
         """按字节流找本次应答；调度超时后仍检查已经到达串口缓冲区的数据。"""
@@ -217,8 +239,7 @@ class MotorBus:
                 frame += struct.pack("<H", crc16(frame))
                 try:
                     self._ser.reset_input_buffer()
-                    if self._ser.write(frame) != len(frame):
-                        raise ProtocolError("串口未完整发送命令")
+                    self._write_frame(frame)
                     self._ser.flush()
                     return self._read_response(address, cmd, time.monotonic() + self.timeout)
                 except (OSError, ProtocolError) as exc:

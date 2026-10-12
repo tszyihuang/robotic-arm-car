@@ -9,7 +9,7 @@ from . import detect_target
 from . import calibrate_ball_position
 from . import calibrate_object_position
 from .mission import TASK_SECTIONS
-from base.control import check_cancel
+from base.control import check_cancel, wait_cancelable
 
 
 LOCK_TARGET_COMMANDS = {
@@ -20,7 +20,9 @@ LOCK_TARGET_COMMANDS = {
 
 
 # 指令 → 设备、方法、允许的参数数量；不执行任务表中的 Python 代码。
+# sleep 由执行器等待，无需设备。
 COMMANDS = {
+    "sleep": (None, None, (1,)),
     "straight": ("base", "straight", (1, 2)),
     "turn": ("base", "turn", (1, 2)),
     "calibrate-position": ("base", "calibrate_position", (0,)),
@@ -91,6 +93,8 @@ def load_section(path, section):
             args = tuple(float(value) for value in values)
             if any(not math.isfinite(value) for value in args):
                 raise ValueError("参数必须为有限数值")
+            if command == "sleep" and args[0] < 0:
+                raise ValueError("sleep 延时必须为非负秒数")
             if command in LOCK_TARGET_COMMANDS and args and args[0] < 0:
                 raise ValueError("锁靶超时必须为非负数，0 表示不限时")
         except ValueError as exc:
@@ -128,6 +132,11 @@ def load_branches(path, steps, *, section="主线"):
 
 def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
     check_cancel(stop_event)
+    if step.command == "sleep":
+        if not getattr(base, "dry_run", False):
+            event = stop_event if stop_event is not None else getattr(base, "stop_event", None)
+            wait_cancelable(step.args[0], event)
+        return None
     owner, method, _ = COMMANDS[step.command]
     device = {"base": base, "arm": arm, "vision": vision}[owner]
     args = step.args

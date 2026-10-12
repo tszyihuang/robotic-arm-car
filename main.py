@@ -48,7 +48,7 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
 
         run_steps(steps, section)
     finally:
-        # 底盘保持零速度闭环，机械臂保留最后目标；关闭连接时不释放电机。
+        # 底盘保留当前停车／释放状态，机械臂保留最后目标。
         cleanup(("底盘停车", base.stop),
                 ("底盘关闭", lambda: base.close(release_motors=False)), ("机械臂关闭", arm.close),
                 ("视觉关闭", vision.close), raise_errors=False)

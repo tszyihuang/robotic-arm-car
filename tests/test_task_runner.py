@@ -1,8 +1,14 @@
 """任务表段落边界、注释及执行前语法校验。"""
+import contextlib
+import io
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from unittest.mock import Mock, patch
 
+import main
+from base.control import MotionCancelled
 from tasks.runner import load_main, load_section, list_sections
 
 
@@ -54,6 +60,7 @@ class TaskParserTests(unittest.TestCase):
 
     def test_invalid_command_arity_and_nonfinite_numbers_report_line(self):
         for command in ("未知 1", "straight", "align 1", "turn 44 0.24 150",
+                        "sleep", "sleep 1 2", "sleep -0.5", "sleep nan", "sleep inf", "sleep 错误",
                         "arm-move 0 0 160", "arm-disable 1", "calibrate-ball-position 1", "detect-targets 1",
                         "lock-target-left -1", "lock-target-middle 1 2", "lock-target-right nan",
                         "小球任务 1", "打靶任务 2", "人质任务 3",
@@ -61,7 +68,54 @@ class TaskParserTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaisesRegex(ValueError, "tasks.txt:3"):
                 self.parse(f"[主线]\nstraight 0.48\n{command}\n")
 
+    def test_sleep_accepts_seconds_zero_and_comments(self):
+        steps = self.parse("[主线]\nsleep 0.5 # 等待半秒\nsleep 2\nsleep 0\n")
+        self.assertEqual([(step.command, step.args) for step in steps],
+                         [("sleep", (0.5,)), ("sleep", (2.0,)), ("sleep", (0.0,))])
+
     def test_mission_directives_are_parsed_without_arguments(self):
         steps = self.parse("[主线]\n小球任务 # 按颜色选择\n打靶任务\n人质任务\n")
         self.assertEqual([(step.command, step.args) for step in steps],
                          [("小球任务", ()), ("打靶任务", ()), ("人质任务", ())])
+
+
+class SleepExecutionTests(unittest.TestCase):
+    def run_tasks(self, base, *, stop_event=None):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tasks.txt"
+            path.write_text("[延时测试]\nsleep 0.5\nstraight 0.3\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main.run(base, Mock(), Mock(), tasks_path=path,
+                         section="延时测试", stop_event=stop_event)
+
+    def test_wait_finishes_before_next_command_without_extra_step_gap(self):
+        trace = []
+        base = Mock(dry_run=False, stop_event=None)
+        base.straight.side_effect = lambda distance: trace.append(("straight", distance))
+        with patch("base.control.time.sleep", side_effect=lambda seconds: trace.append(("sleep", seconds))), \
+                patch("tasks.runner.pause") as pause:
+            self.run_tasks(base)
+        self.assertEqual(trace, [("sleep", 0.5), ("straight", 0.3)])
+        pause.assert_called_once_with(base)
+
+    def test_cancellation_during_sleep_prevents_next_command(self):
+        base = Mock(dry_run=False)
+        stop = threading.Event()
+
+        def cancel_wait(seconds):
+            self.assertEqual(seconds, 0.5)
+            stop.set()
+            return True
+
+        with patch.object(stop, "wait", side_effect=cancel_wait), self.assertRaises(MotionCancelled):
+            self.run_tasks(base, stop_event=stop)
+        base.straight.assert_not_called()
+        base.stop.assert_called_once()
+        base.close.assert_called_once_with(release_motors=False)
+
+    def test_dry_run_does_not_wait(self):
+        base = Mock(dry_run=True)
+        with patch("tasks.runner.wait_cancelable") as wait, patch("tasks.runner.pause"):
+            self.run_tasks(base)
+        wait.assert_not_called()
+        base.straight.assert_called_once_with(0.3)

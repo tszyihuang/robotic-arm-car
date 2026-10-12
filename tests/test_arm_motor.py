@@ -5,6 +5,8 @@ import struct
 import unittest
 from unittest.mock import patch
 
+import serial
+
 from arm.errors import ProtocolError
 from arm.motor import MotorBus, crc16
 
@@ -119,6 +121,61 @@ class MotorBusTests(unittest.TestCase):
             bus.exchange(1, 0x0B)
         self.assertEqual(len(serial_port.writes), 3)
         self.assertLessEqual(serial_port.now, 0.36)
+
+    def test_status_write_timeout_retries_with_new_sequence_and_ignores_late_reply(self):
+        bus, serial_port = self.make_bus([
+            response,
+            lambda request: response(request, sequence=1) + response(request),
+        ])
+        write = serial_port.write
+
+        def delayed_write(request):
+            written = write(request)
+            if len(serial_port.writes) == 1:
+                # 模拟查询已接受，但主机被调度延迟超过写入上限。
+                serial_port.now += 1.01
+                raise serial.SerialTimeoutException("Write timeout")
+            return written
+
+        with patch.object(serial_port, "write", side_effect=delayed_write):
+            self.assertEqual(bus.motors[3].read_status()["fault_code"], 0)
+        self.assertEqual([frame[1] for frame in serial_port.writes], [1, 2])
+        self.assertTrue(all(frame[2:4] == bytes((3, 0x0B)) for frame in serial_port.writes))
+
+    def test_persistent_status_write_timeout_stops_after_three_attempts_with_context(self):
+        bus, serial_port = self.make_bus([])
+
+        def fail_write(request):
+            serial_port.writes.append(request)
+            serial_port.now += 1.01
+            raise serial.SerialTimeoutException("Write timeout")
+
+        with patch.object(serial_port, "write", side_effect=fail_write):
+            with self.assertRaisesRegex(ProtocolError, r"ID3.*0x0B.*写入超时.*已尝试 3 次") as failed:
+                bus.motors[3].read_status()
+        self.assertEqual([frame[1] for frame in serial_port.writes], [1, 2, 3])
+        self.assertIn("/fake", str(failed.exception))
+        self.assertIn("write_timeout=1.0s", str(failed.exception))
+        self.assertIn("帧长 7 字节", str(failed.exception))
+        self.assertIsInstance(failed.exception.__cause__.__cause__, serial.SerialTimeoutException)
+
+    def test_write_timeout_does_not_replay_movement_or_parameter_change(self):
+        for command, size in ((0x25, 9), (0x26, 17), (0x2F, 0), (0x15, 24)):
+            with self.subTest(command=command):
+                bus, serial_port = self.make_bus([])
+                with patch.object(serial_port, "write", side_effect=serial.SerialTimeoutException("Write timeout")) as write:
+                    with self.assertRaisesRegex(ProtocolError, "写入超时"):
+                        bus.exchange(3, command, bytes(size))
+                write.assert_called_once()
+
+    def test_disconnected_serial_is_not_retried_as_a_status_timeout(self):
+        bus, serial_port = self.make_bus([])
+        original = serial.SerialException("device disconnected")
+        with patch.object(serial_port, "write", side_effect=original) as write:
+            with self.assertRaisesRegex(ProtocolError, "device disconnected.*已尝试 1 次") as failed:
+                bus.motors[3].read_status()
+        write.assert_called_once()
+        self.assertIs(failed.exception.__cause__, original)
 
     def test_position_and_disable_commands_are_not_automatically_retried(self):
         for command in (0x25, 0x26, 0x2F):

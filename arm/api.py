@@ -31,7 +31,8 @@ class Arm:
                 from .motor import MotorBus, SimulatedBus
                 config = self.config
                 self._bus = (SimulatedBus(config) if self._simulate else MotorBus(
-                    config.port, config.baudrate, config.serial_timeout, latency_ms=config.serial_latency_ms))
+                    config.port, config.baudrate, config.serial_timeout,
+                    latency_ms=config.serial_latency_ms, write_timeout=config.serial_write_timeout))
             return self._bus
 
     def _ensure_servo(self):

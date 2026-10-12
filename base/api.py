@@ -21,7 +21,8 @@ class Base:
         check_cancel(self.stop_event)
         if self.motor is None:
             from .motor import Motor
-            self.motor = Motor(self.config["motor_port"], stop_event=self.stop_event)
+            self.motor = Motor(self.config["motor_port"], stop_event=self.stop_event,
+                               write_timeout=self.config["write_timeout"])
         if not self._imu_checked:
             from sensor.imu import ImuLink, find_imu_port
             skip = [self.motor.port, ARM["port"], ARM["gripper_port"]]
@@ -84,7 +85,7 @@ class Base:
         self.motor.default_timeout = 0.0  # 倒车时每拍立即检查撞击，不等待编码器。
         try:
             result = calibrate_position.calibrate_position(
-                self.motor, self.imu, speed=self.config["speed"],
+                self.motor, self.imu, speed=POSITION["speed"],
                 max_distance_mm=POSITION["max_distance_m"] * 1000,
                 timeout=POSITION["timeout"], stop_event=self.stop_event)
         finally:
