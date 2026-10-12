@@ -9,7 +9,7 @@ from arm.api import Arm
 from arm.config import ArmConfig
 from arm.controller import Arm as JointController
 from arm.motor import SimulatedBus
-from arm.servo import MODE, TORQUE_ENABLE, SERVO_FIXED_POSITIONS
+from arm.servo import MODE, PRESENT_POSITION, TORQUE_ENABLE, SERVO_FIXED_POSITIONS
 from base.control import MotionCancelled
 from base.feedback import WheelOdometry
 from config import BASE, STRAIGHT
@@ -51,6 +51,22 @@ class OdometryTests(unittest.TestCase):
 
 
 class ArmControlTests(unittest.TestCase):
+    def test_read_servo_angle_reuses_ttl_without_connecting_joint_bus_or_enabling_torque(self):
+        session = Arm(simulate=True)
+        self.addCleanup(session.close)
+        servo = session._ensure_servo()
+        servo.status(servo_id=1)
+        for addr, position in ((1, 345), (2, 2764)):
+            servo._ser.memories[addr][PRESENT_POSITION:PRESENT_POSITION + 2] = position.to_bytes(2, 'little')
+        before = {addr: servo.status(servo_id=addr) for addr in (1, 2)}
+        with patch.object(servo, '_write_register', side_effect=AssertionError('读取角度不应写寄存器')):
+            for addr in (1, 2):
+                self.assertAlmostEqual(session.read_servo_angle(addr), before[addr]['angle_deg'])
+        self.assertIs(session._servo, servo)
+        self.assertIsNone(session._bus)
+        self.assertFalse(session.calibrated)
+        self.assertEqual({addr: servo.status(servo_id=addr) for addr in (1, 2)}, before)
+
     def test_task_calibration_holds_tool_and_reuses_gripper_connection(self):
         for gripper_first in (False, True):
             with self.subTest(gripper_first=gripper_first), contextlib.redirect_stdout(io.StringIO()):
@@ -74,9 +90,11 @@ class ArmControlTests(unittest.TestCase):
                     self.assertEqual(servo._target, gripper_target)
                     self.assertTrue(all(not motor.enabled for motor in session._bus.motors.values()))
                 execute(Step(3, 'arm-disable', ()), None, session, None)
-                self.assertTrue(servo.status(servo_id=1)['torque_enabled'])
+                self.assertFalse(servo.status(servo_id=1)['torque_enabled'])
+                self.assertFalse(servo.status(servo_id=2)['torque_enabled'])
                 session.close()
-                self.assertEqual(servo._ser.memories[1][TORQUE_ENABLE], 1)
+                self.assertEqual(servo._ser.memories[1][TORQUE_ENABLE], 0)
+                self.assertEqual(servo._ser.memories[2][TORQUE_ENABLE], 0)
 
     def test_default_calibration_and_angle_reads_do_not_enable_tool(self):
         session = Arm(simulate=True)
@@ -207,12 +225,71 @@ class ArmControlTests(unittest.TestCase):
         session = Arm(simulate=True)
         self.addCleanup(session.close)
         bus = session._ensure_bus()
+        for motor in bus.motors.values():
+            motor.enabled = True
+            motor.read_status = Mock(side_effect=AssertionError('独立失能不应读取编码器'))
+        servo = session._ensure_servo()
+        servo.hold_fixed_position(1)
+        servo.move_to(3000)
         bus.disable_all = Mock(wraps=bus.disable_all)
         with contextlib.redirect_stdout(io.StringIO()):
             session.disable()
         self.assertIs(session._bus, bus)
+        self.assertIs(session._servo, servo)
+        self.assertIsNone(session._arm)
         bus.disable_all.assert_called_once()
         self.assertFalse(bus.closed)
+        self.assertTrue(all(not motor.enabled for motor in bus.motors.values()))
+        self.assertFalse(servo.status(servo_id=1)['torque_enabled'])
+        self.assertFalse(servo.status(servo_id=2)['torque_enabled'])
+
+    def test_disable_connects_both_buses_without_calibration(self):
+        session = Arm(simulate=True)
+        self.addCleanup(session.close)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = session.disable()
+        self.assertTrue(result['ok'])
+        self.assertIsNotNone(session._bus)
+        self.assertIsNotNone(session._servo)
+        self.assertFalse(session.calibrated)
+        self.assertFalse(session._servo.status(servo_id=1)['torque_enabled'])
+        self.assertFalse(session._servo.status(servo_id=2)['torque_enabled'])
+
+    def test_disable_attempts_both_servos_when_joint_bus_fails(self):
+        session = Arm(simulate=True)
+        self.addCleanup(session.close)
+        bus, servo = session._ensure_bus(), session._ensure_servo()
+        servo.hold_fixed_position(1)
+        servo.move_to(3000)
+        with patch.object(bus, 'disable_all', side_effect=OSError('四轴失能失败')), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(OSError, '四轴失能失败'):
+            session.disable()
+        self.assertFalse(servo.status(servo_id=1)['torque_enabled'])
+        self.assertFalse(servo.status(servo_id=2)['torque_enabled'])
+
+    def test_disable_attempts_gripper_when_tool_reply_fails(self):
+        session = Arm(simulate=True)
+        self.addCleanup(session.close)
+        bus, servo = session._ensure_bus(), session._ensure_servo()
+        for motor in bus.motors.values():
+            motor.enabled = True
+        servo.hold_fixed_position(1)
+        servo.move_to(3000)
+        write = servo._write_register
+
+        def fail_tool_disable(address, data, *, servo_id=None):
+            if address == TORQUE_ENABLE and data == b'\x00' and servo_id == 1:
+                raise OSError('工具舵机失能失败')
+            return write(address, data, servo_id=servo_id)
+
+        with patch.object(servo, '_write_register', side_effect=fail_tool_disable), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(OSError, '工具舵机失能失败'):
+            session.disable()
+        self.assertTrue(all(not motor.enabled for motor in bus.motors.values()))
+        self.assertTrue(servo.status(servo_id=1)['torque_enabled'])
+        self.assertFalse(servo.status(servo_id=2)['torque_enabled'])
 
     def test_cancelled_initial_calibration_closes_bus_and_can_retry(self):
         stop = threading.Event()

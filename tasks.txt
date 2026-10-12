@@ -1,6 +1,11 @@
 [主线]
+arm-calibrate 
+arm-move 0 0 122.34 79.61
+
+pause
+
 straight 0.31
-arm-calibrate            # 扫码姿态前建立机械臂软件基准
+           # 扫码姿态前建立机械臂软件基准
 arm-move 6 0 160 1
 scan-qrcode    # 三位任务码：排爆物颜色、反恐靶颜色、救援目标形状
 home

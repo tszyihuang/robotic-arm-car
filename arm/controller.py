@@ -44,6 +44,7 @@ class Arm:
                 self.config.gripper_port, baudrate=self.config.gripper_baudrate,
                 servo_id=self.config.gripper_servo_id, speed=self.config.gripper_speed,
                 timeout=self.config.gripper_timeout, simulate=self._simulate,
+                write_timeout=self.config.gripper_write_timeout,
                 release_on_close=self.config.gripper_release_on_close)
         return self._gripper
 

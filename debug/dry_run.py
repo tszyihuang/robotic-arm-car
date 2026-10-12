@@ -22,7 +22,8 @@ class DryBase:
         print(f"base.align(vision, spin_speed={ALIGN['SPIN_SPEED']:g} mm/s, "
               f"rate_source={BASE['align_rate_src']!r})")
 
-    def vision_straight(self, distance, vision):
+    def vision_straight(self, distance, vision, speed=None):
+        speed = BASE['speed'] if speed is None else speed
         finish = VISION_CONTROL['GAP_FINISH_MM'] / 1000
         detail = ("全程视觉巡线，修正横向偏移" if finish == 0 else
                   "全程 gap 保持起步航向" if distance <= finish else
@@ -33,7 +34,7 @@ class DryBase:
                        if offset else "，目标居中")
             detail += (f"，视觉丢失切换 gap 盲走，连续 {VISION_CONTROL['GAP_RECOVERY_FRAMES']} 帧"
                        "有效后恢复视觉")
-        print(f"base.vision_straight({distance:g} m, {BASE['speed']:g} mm/s)  # {detail}")
+        print(f"base.vision_straight({distance:g} m, {speed:g} mm/s)  # {detail}")
 
     def stop(self):
         pass
@@ -55,7 +56,8 @@ class DryArm:
             print("arm.calibrate()  # 读取软件基准，不运动")
 
     def disable(self):
-        print("arm.disable()  # ID1-4 失能，夹爪保持")
+        ids = "、".join(map(str, sorted({1, ARM['gripper_servo_id']})))
+        print(f"arm.disable()  # 四轴电机 ID1-4 和舵机 ID{ids} 全部失能")
 
     def move_joints(self, q1, q2, q3, q4):
         from arm.config import ArmConfig

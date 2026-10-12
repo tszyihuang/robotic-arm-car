@@ -8,11 +8,12 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 
 import main
 from tasks import ball, target, delivery
 from arm.api import Arm
+from arm.servo import TORQUE_ENABLE
 from base.control import MotionCancelled
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,15 +143,17 @@ class MissionTests(unittest.TestCase):
         self.assertNotIn('[主线 ', result.stdout)
         self.assertNotIn('[抓中间的小球 ', result.stdout)
 
-    def test_task_table_explicit_disable_preserves_gripper_and_allows_next_move(self):
+    def test_task_table_explicit_disable_releases_all_servos_and_allows_next_move(self):
         for next_move in (False, True):
             with self.subTest(next_move=next_move):
                 arm = Arm(simulate=True)
                 arm.dry_run = True
                 with contextlib.redirect_stdout(io.StringIO()):
-                    arm.calibrate()
+                    arm.calibrate(hold_tool=True)
                     arm.close_gripper()
                 bus, servo = arm._bus, arm._servo
+                controller = arm._arm
+                zero = dict(controller.encoder_zero_deg)
                 servo.disable_torque = Mock(wraps=servo.disable_torque)
                 text = "[主线]\narm-move 10 20 130 40\narm-disable\n"
                 if next_move:
@@ -159,7 +162,11 @@ class MissionTests(unittest.TestCase):
                     self.run_tasks(text, Mock(), arm, Mock())
                 disable.assert_called_once_with()
                 self.assertTrue(all(m.enabled == next_move for m in bus.motors.values()))
-                servo.disable_torque.assert_not_called()
+                self.assertEqual(servo.disable_torque.call_args_list,
+                                 [call(servo_id=1), call(servo_id=2)])
+                self.assertEqual(servo._ser.memories[1][TORQUE_ENABLE], 0)
+                self.assertEqual(servo._ser.memories[2][TORQUE_ENABLE], 0)
+                self.assertEqual(controller.encoder_zero_deg, zero)
                 self.assertTrue(bus.closed)
 
     def test_main_executes_only_selected_section_in_file_order(self):

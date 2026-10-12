@@ -9,6 +9,8 @@ import threading
 import time
 import warnings
 
+import serial
+
 from .config import finite
 from config import SERVO
 from .errors import ArmError, MotionTimeout, ProtocolError
@@ -18,6 +20,7 @@ SERVO_ID = SERVO['default_id']
 SERVO_BAUDRATE = SERVO['baudrate']
 SERVO_SPEED = SERVO['speed']  # 舵机原生速度值，不是关节电机的 rpm。
 SERVO_TIMEOUT = SERVO['timeout']
+SERVO_WRITE_TIMEOUT = SERVO['write_timeout']
 SERVO_STEP_PER_DEG = 4095 / 360
 SERVO_FIXED_POSITIONS = SERVO['fixed_positions']
 
@@ -55,7 +58,7 @@ class FeetechSTSServo:
 
     def __init__(self, port=None, *, baudrate=None, servo_id=SERVO_ID,
                  timeout=SERVO_TIMEOUT, speed=SERVO_SPEED, simulate=False,
-                 release_on_close=False, serial_port=None):
+                 release_on_close=False, serial_port=None, write_timeout=SERVO_WRITE_TIMEOUT):
         self.servo_id = _integer(servo_id, "舵机 ID", 0, 253)
         if baudrate is not None:
             _integer(baudrate, "波特率", 1, 10000000)
@@ -65,6 +68,9 @@ class FeetechSTSServo:
         self.timeout = finite(timeout, "舵机串口超时")
         if self.timeout <= 0:
             raise ValueError("舵机串口超时必须大于 0")
+        self.write_timeout = finite(write_timeout, "舵机串口写入超时")
+        if self.write_timeout <= 0:
+            raise ValueError("舵机串口写入超时必须大于 0")
         if not isinstance(release_on_close, bool):
             raise ValueError("release_on_close 必须为 bool")
         if simulate and serial_port is not None:
@@ -84,10 +90,9 @@ class FeetechSTSServo:
                 binding = detect_servo_device(port=port, baudrate=baudrate,
                                                servo_id=servo_id, timeout=self.timeout)
                 self.port, self.baudrate = binding["port"], binding["baudrate"]
-            import serial
             serial_port = serial.Serial(self.port, baudrate=self.baudrate,
                                         timeout=min(self.timeout, 0.01),
-                                        write_timeout=self.timeout, exclusive=True)
+                                        write_timeout=self.write_timeout, exclusive=True)
         self._ser = serial_port
 
     @staticmethod
@@ -99,14 +104,20 @@ class FeetechSTSServo:
             text.append("未知状态位 0x80")
         return " + ".join(text)
 
-    def _read_exact(self, size, deadline):
+    def _read_exact(self, size, deadline, *, servo_id=None):
         data = bytearray()
-        while len(data) < size and time.monotonic() < deadline:
-            chunk = self._ser.read(size - len(data))
+        while len(data) < size:
+            waiting = self._ser.in_waiting
+            # 调度延迟后先取已经收到的回包，避免把缓冲中的有效数据判成超时。
+            if not waiting and time.monotonic() >= deadline:
+                break
+            chunk = self._ser.read(min(size - len(data), waiting) if waiting else size - len(data))
             if chunk:
                 data.extend(chunk)
         if len(data) != size:
-            raise ProtocolError(f"舵机 ID{self.servo_id} 应答超时：需要 {size} 字节，收到 {len(data)}")
+            address = self.servo_id if servo_id is None else servo_id
+            raise ProtocolError(f"舵机 ID{address} 应答超时（端口 {self.port}，timeout={self.timeout}s）："
+                                f"需要 {size} 字节，收到 {len(data)}")
         return bytes(data)
 
     def _exchange(self, instruction, params=b"", expected_size=0, *, servo_id=None):
@@ -117,17 +128,25 @@ class FeetechSTSServo:
             body = bytes((address, len(params) + 2, instruction)) + params
             packet = b"\xff\xff" + body + bytes((_checksum(body),))
             self._ser.reset_input_buffer()
-            if self._ser.write(packet) != len(packet):
+            started = time.monotonic()
+            try:
+                written = self._ser.write(packet)
+            except serial.SerialTimeoutException as exc:
+                raise serial.SerialTimeoutException(
+                    f"舵机串口写入超时（端口 {self.port}，baudrate={self.baudrate}，ID{address}，"
+                    f"指令 0x{instruction:02X}，write_timeout={self.write_timeout}s，"
+                    f"耗时 {time.monotonic() - started:.3f}s，帧长 {len(packet)}）：{exc}") from exc
+            if written != len(packet):
                 raise ProtocolError("舵机指令未完整发送")
             self._ser.flush()
             deadline = time.monotonic() + self.timeout
-            header = self._read_exact(4, deadline)
+            header = self._read_exact(4, deadline, servo_id=address)
             if header[:2] != b"\xff\xff" or header[2] != address:
                 raise ProtocolError("舵机应答帧头或 ID 不匹配")
             length = header[3]
             if not 2 <= length <= 66:
                 raise ProtocolError("舵机应答长度异常")
-            tail = self._read_exact(length, deadline)
+            tail = self._read_exact(length, deadline, servo_id=address)
             if _checksum(header[2:] + tail[:-1]) != tail[-1]:
                 raise ProtocolError("舵机应答校验和错误")
             if tail[0]:
@@ -145,9 +164,10 @@ class FeetechSTSServo:
     def _write_register(self, address, data, *, servo_id=None):
         return self._exchange(0x03, bytes((address,)) + data, servo_id=servo_id)
 
-    def read_position(self):
+    def read_position(self, *, servo_id=None):
         """返回编码器位置整数；STS 的负值按符号幅值解码。"""
-        return _signed_magnitude(struct.unpack("<H", self.read_register(PRESENT_POSITION))[0])
+        return _signed_magnitude(struct.unpack(
+            "<H", self.read_register(PRESENT_POSITION, servo_id=servo_id))[0])
 
     def status(self, *, servo_id=None):
         with self._lock:
@@ -166,11 +186,14 @@ class FeetechSTSServo:
         """显式使能；move_to 会先写目标再使能，避免恢复旧位置目标。"""
         self._write_register(TORQUE_ENABLE, b"\x01")
 
-    def disable_torque(self):
+    def disable_torque(self, *, servo_id=None):
+        """关闭指定舵机的扭矩；省略 ID 时关闭当前舵机。"""
+        address = self.servo_id if servo_id is None else _integer(servo_id, "舵机 ID", 0, 253)
         with self._lock:
-            self._write_register(TORQUE_ENABLE, b"\x00")
-            self._motion_commanded = False
-            self._target = None
+            self._write_register(TORQUE_ENABLE, b"\x00", servo_id=address)
+            if address == self.servo_id:
+                self._motion_commanded = False
+                self._target = None
 
     def set_torque_limit(self, value):
         value = _integer(value, "扭矩限制", 0, 1000)
@@ -342,6 +365,10 @@ class _SimulatedServoSerial:
         self.memory[62:64] = bytes((120, 25))
         self.memories = {servo_id: self.memory}
         self.buffer = b""
+
+    @property
+    def in_waiting(self):
+        return len(self.buffer)
 
     def reset_input_buffer(self):
         self.buffer = b""

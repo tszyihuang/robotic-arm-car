@@ -61,6 +61,20 @@ class UnrestrictedServoTests(unittest.TestCase):
         servo.move_to(3000)
         self.assertEqual(servo.read_position(), 3000)
 
+    def test_disabling_tool_id_preserves_gripper_state_until_gripper_is_disabled(self):
+        servo = self.make_servo(2)
+        servo.hold_fixed_position(1)
+        servo.move_to(3000)
+        servo.disable_torque(servo_id=1)
+        self.assertFalse(servo.status(servo_id=1)['torque_enabled'])
+        self.assertTrue(servo.status(servo_id=2)['torque_enabled'])
+        self.assertEqual(servo._target, 3000)
+        self.assertTrue(servo._motion_commanded)
+        servo.disable_torque()
+        self.assertFalse(servo.status(servo_id=2)['torque_enabled'])
+        self.assertIsNone(servo._target)
+        self.assertFalse(servo._motion_commanded)
+
     def test_relative_rotation_is_allowed_for_both_ids_without_angle_guard(self):
         for address in (1, 2):
             with self.subTest(address=address):

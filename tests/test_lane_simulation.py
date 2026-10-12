@@ -157,6 +157,29 @@ class LaneSimulationTests(unittest.TestCase):
                 self.assertLess(abs(math.degrees(world.yaw)), 2)
                 self.assertEqual(world.command, [0, 0])
 
+    def test_task_api_drives_one_meter_at_600_mm_per_second_and_stops(self):
+        world = LaneWorld(0)
+        base = Base()
+        base.motor = world
+        heading = vs.VisionHeading(world.cfg, world)
+        speeds = []
+        spd = world.spd
+
+        def record_speed(*wheels):
+            spd(*wheels)
+            speeds.append(sum(world.velocity) / 2)
+
+        with patch.dict(VISION_CONTROL, LOG_DIR=None, LATERAL_OFFSET_MM=0), \
+                patch.object(base, '_heading', return_value=heading), \
+                patch.object(world, 'spd', side_effect=record_speed), \
+                patch.object(vs.time, 'time', side_effect=lambda: world.now), \
+                redirect_stdout(StringIO()):
+            result = base.vision_straight(1, world, speed=600)
+        self.assertTrue(result['ok'])
+        self.assertAlmostEqual(result['distance_m'], 1, delta=0.03)
+        self.assertAlmostEqual(max(speeds), 600, delta=15)
+        self.assertEqual(world.command, [0, 0])
+
     def test_visual_outage_uses_gap_and_recovery_resumes_lateral_correction(self):
         for recover in (False, True):
             with self.subTest(recover=recover):

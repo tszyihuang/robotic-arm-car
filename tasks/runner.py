@@ -8,6 +8,7 @@ from . import detect_ball
 from . import detect_target
 from . import calibrate_ball_position
 from . import calibrate_object_position
+from . import wait_continue
 from .mission import TASK_SECTIONS
 from base.control import check_cancel, wait_cancelable
 
@@ -20,16 +21,17 @@ LOCK_TARGET_COMMANDS = {
 
 
 # 指令 → 设备、方法、允许的参数数量；不执行任务表中的 Python 代码。
-# sleep 由执行器等待，无需设备。
+# sleep 无需设备；pause 同时检测回车和夹爪舵机 ID2 的转动。
 COMMANDS = {
     "sleep": (None, None, (1,)),
+    "pause": (None, None, (0,)),
     "straight": ("base", "straight", (1, 2)),
     "turn": ("base", "turn", (1, 2)),
     "calibrate-position": ("base", "calibrate_position", (0,)),
     "calibrate-ball-position": ("base", "calibrate_ball_position", (0,)),
     "calibrate-object-position": ("base", "calibrate_object_position", (0,)),
     "align": ("base", "align", (0,)),
-    "vision-straight": ("base", "vision_straight", (1,)),
+    "vision-straight": ("base", "vision_straight", (1, 2)),
     "arm-calibrate": ("arm", "calibrate", (0,)),
     "arm-disable": ("arm", "disable", (0,)),
     "arm-move": ("arm", "move_joints", (4,)),
@@ -95,6 +97,8 @@ def load_section(path, section):
                 raise ValueError("参数必须为有限数值")
             if command == "sleep" and args[0] < 0:
                 raise ValueError("sleep 延时必须为非负秒数")
+            if command == "vision-straight" and len(args) == 2 and not 0 < args[1] <= 1000:
+                raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
             if command in LOCK_TARGET_COMMANDS and args and args[0] < 0:
                 raise ValueError("锁靶超时必须为非负数，0 表示不限时")
         except ValueError as exc:
@@ -132,6 +136,12 @@ def load_branches(path, steps, *, section="主线"):
 
 def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
     check_cancel(stop_event)
+    if step.command == "pause":
+        if not getattr(base, "dry_run", False):
+            event = stop_event if stop_event is not None else getattr(base, "stop_event", None)
+            wait_continue.run(arm, stop_event=event)
+            check_cancel(event)
+        return None
     if step.command == "sleep":
         if not getattr(base, "dry_run", False):
             event = stop_event if stop_event is not None else getattr(base, "stop_event", None)
@@ -140,8 +150,10 @@ def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
     owner, method, _ = COMMANDS[step.command]
     device = {"base": base, "arm": arm, "vision": vision}[owner]
     args = step.args
-    if step.command in ("align", "vision-straight"):
+    if step.command == "align":
         args += (vision,)
+    elif step.command == "vision-straight":
+        args = (args[0], vision, *args[1:])
     if step.command == "detect-balls":
         result = detect_ball.run(device)
     elif step.command == "detect-targets":

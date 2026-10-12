@@ -57,6 +57,8 @@ class ArmConfig:
                 raise ValueError(f"{name} 必须是 [{lo}, {hi}] 内的整数")
         if finite(self.gripper_timeout, "gripper_timeout") <= 0:
             raise ValueError("gripper_timeout 必须大于 0")
+        if finite(self.gripper_write_timeout, "gripper_write_timeout") <= 0:
+            raise ValueError("gripper_write_timeout 必须大于 0")
         for name in ("gripper_open_angle_deg", "gripper_close_angle_deg"):
             if not 0 <= finite(getattr(self, name), name) <= 360:
                 raise ValueError(f"{name} 必须在 [0, 360]° 范围内")

@@ -110,12 +110,14 @@ ARM = {
     "arrival_speed_rpm": None,  # 默认按角度连续到位确认；填正数时额外检查转速（rpm）。
     "gripper_port": None, "gripper_baudrate": None, "gripper_servo_id": 2,
     "gripper_speed": 1000, "gripper_timeout": 0.1,
+    "gripper_write_timeout": 1.0,  # TTL 写入上限；应答等待仍用 gripper_timeout。
     "gripper_open_angle_deg": 291.0, "gripper_close_angle_deg": 243.0,
     "gripper_release_on_close": False,
 }
 
 SERVO = {
     "default_id": 1, "baudrate": 1000000, "speed": 1000, "timeout": 0.1,
+    "write_timeout": 1.0,
     "move_timeout": 8.0, "arrival_tolerance": 6, "settle_seconds": 0.2,
     "fixed_positions": {1: 345},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
     "probe_baudrates": (1000000, 115200, 500000, 250000, 128000, 76800, 57600, 38400),

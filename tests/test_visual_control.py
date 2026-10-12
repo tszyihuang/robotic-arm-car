@@ -133,6 +133,43 @@ class GapFinishTests(unittest.TestCase):
                     prepare.assert_called_once_with(vision)
                     hd.wait_track.assert_called_once()
 
+class VisionSpeedTests(unittest.TestCase):
+    def test_selected_speed_applies_in_visual_and_gap_modes_without_changing_default(self):
+        cfg_type = vs.VisionCfg
+        for gap_finish_mm in (0, 1500):
+            with self.subTest(gap_finish_mm=gap_finish_mm):
+                base, vision = Base(), Mock()
+                base.motor, base._imu_checked = Mock(), True
+                hd = vs.VisionHeading(cfg_type(speed=123), vision)
+                hd.wait_track = Mock()
+                speeds = []
+
+                def run_control(board, heading, *, goal_mm, **kwargs):
+                    speeds.append(heading.cfg.speed)
+                    self.assertEqual(goal_mm, 1000)
+                    return goal_mm, {'reason': ''}
+
+                with patch.dict(VISION_CONTROL, LOG_DIR=None), \
+                        patch.object(vs, 'VisionCfg', side_effect=lambda **kwargs:
+                                     cfg_type(gap_finish_mm=gap_finish_mm, **kwargs)), \
+                        patch.object(base, '_heading', return_value=hd), \
+                        patch.object(vs, 'vision_straight', side_effect=run_control):
+                    self.assertTrue(base.vision_straight(1, vision, speed=600)['ok'])
+                    self.assertTrue(base.vision_straight(1, vision)['ok'])
+                self.assertEqual(speeds, [600, base.config['speed']])
+                self.assertEqual(base.config['speed'], BASE['speed'])
+
+    def test_invalid_speed_is_rejected_before_connecting_or_starting_vision(self):
+        for speed in (0, -1, 1001, float('nan'), float('inf'), -float('inf')):
+            with self.subTest(speed=speed):
+                base, vision = Base(), Mock()
+                with patch.object(base, '_connect') as connect, \
+                        self.assertRaisesRegex(ValueError, '速度'):
+                    base.vision_straight(1, vision, speed=speed)
+                connect.assert_not_called()
+                vision.enable_boundary.assert_not_called()
+
+
 class VisionControlTests(unittest.TestCase):
     def test_actual_straight_loop_reaches_distance_and_writes_log(self):
             board = Mock()

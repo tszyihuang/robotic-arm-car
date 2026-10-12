@@ -26,7 +26,15 @@ python3 main.py --help
 
 机械臂任务段落开头应安排 `arm-calibrate`，将启动时四轴当前位置设为软件基准，并使舵机 ID1 保持固定位置；请在启动前将机械臂摆到对应 `0 0 160 24` 的初始姿态。主线在扫码姿态前建立基准；自动调用动作段时，若机械臂已经校准，段内的 `arm-calibrate` 沿用当前基准，避免在观察姿态重新置零。单独执行该段仍正常校准。纯机械臂任务不启动摄像头和 YOLO。
 
-可用指令：`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
+可用指令：`pause`、`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离 [速度]`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
+
+`pause` 无参数，在 `tasks.txt` 需要暂停的位置单独写一行。暂停时同时检测控制台回车和夹爪舵机 ID2：按下回车，或舵机在最近 0.5 秒内向任意方向移动至少 5°，都会继续下一条指令。检测从本次暂停开始，每约 0.05 秒采样一次，忽略过期样本，并处理 0°/360° 跨界；慢速移动超过半秒才累计到 5°、小幅来回抖动都不会触发。查询起止时间用于保守判断半秒窗口，延迟回包不会被当作新发生的转动。复用机械臂 TTL 连接，只读角度，不改变舵机扭矩；需要手动拨动时可先安排 `arm-disable`。查询写入超时或应答异常时提示，并每隔至少 0.2 秒重试；恢复通信后重新建立角度基准，不跨通信缺失累计转动。设备断开等其他错误提示并保留回车通道。等待期间可按 `Ctrl+C` 取消；标准输入关闭时停止任务。干跑只打印指令、不等待或读取舵机；`pause` 自身不叠加默认步骤间隔。例如：
+
+```text
+arm-move 0 0 122.34 79.61
+pause  # 检查姿态，按回车后继续
+straight 0.31
+```
 
 `sleep 秒数` 在当前段落中等待指定时间后继续，例如 `sleep 0.5` 延时半秒，`sleep 2` 延时两秒。支持小数和 `sleep 0`，负数或非有限数值会在执行前报错。等待期间可按 `Ctrl+C` 取消；干跑只打印指令、不实际等待。`sleep` 自身不叠加默认步骤间隔，也不连接设备。
 
@@ -64,7 +72,7 @@ python3 main.py --help
 
 仅电机测试可运行 `python3 -m debug.ball_motor_check --port /dev/ttyUSB0 --distance-mm 20`：只打开明确指定的电机串口，使用真实编码器构造模拟视觉目标；单次目标限制在 ±30 mm，累计移动保护 45 mm，超时 12 s，退出保留零速闭环。测试不连接摄像头、IMU 或机械臂，不能替代真实球识别和像素比例的验证。结果默认保存在 `/tmp/ball_motor_check.json`，可通过 `--output` 指定位置。
 
-动作均需在执行的任务段落中明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂 ID1–4 失能，夹爪保持；无需先校准，已建立的软件零点仍保留。后续位置指令会重新使能。`tasks.txt` 的 `[主线]` 段回位后安排了该失能指令。
+动作均需在执行的任务段落中明确列出，包括机械臂校准；使用 `arm-move` 或回位前应先安排 `arm-calibrate`。`arm-disable` 无参数，调用 `arm.disable()` 让机械臂四轴电机 ID1–4、工具旋转舵机 ID1 和夹爪舵机 ID2 全部失能（夹爪 ID 由 `ARM['gripper_servo_id']` 配置）。无需先校准，按需连接 RS485 与 TTL 两条总线，已建立的软件零点仍保留。某个设备失能失败时仍尝试其余设备，随后报错并停止任务。后续 `arm-move` / `home` 重新使能四轴，`gripper-open` / `gripper-close` 重新使能夹爪，`arm-calibrate` 重新使工具舵机保持配置位置。
 
 运行依赖列在 `requirements.txt`，已验证 Python 3.12 和 Ultralytics 8.4.164。安装依赖时保留本机已匹配的 OpenCV、PyTorch、torchvision 和 CUDA 环境。
 
@@ -79,6 +87,8 @@ python3 main.py
 底盘串口单次写入最长等待时间由 `BASE['write_timeout']` 配置，默认 1.0 秒，原先固定为 0.2 秒。`Write timeout` 表示主机串口写操作超时，与 `BASE['turn_timeout']` 的整段转弯超时不同，也不是等待驱动板应答（轮速指令无回复）。报错包含端口、写入上限和指令；写入超时仍停止任务，不自动重发可能部分写入的运动指令。正常写入完成后立即继续，延长上限不会每帧固定等待 1 秒；编码器／IMU 数据过期检查继续生效。反复发生时需检查 USB／串口连接和主机负载，单纯延长上限不能保证解决通信故障。
 
 机械臂 RS485 分开配置发送和应答等待：`ARM['serial_write_timeout']=1.0` 秒限制单次写入（原为 0.1 秒），`ARM['serial_timeout']=0.1` 秒限制发送完成后的应答等待。写入超时会显示串口、写入上限、耗时和帧长。只读状态查询 `0x0B` 在写入超时或应答异常时最多尝试 3 次，每次使用新序号过滤迟到回复；设备断开等传输错误立即停止。移动指令不会自动重发，避免重复启动运动。正常发送立即继续，延长上限不会每次固定等待 1 秒。反复发生写入超时仍需检查 USB／RS485 连接、供电和主机负载。
+
+舵机 TTL 同样分开配置：`ARM['gripper_write_timeout']=1.0` 秒限制串口写入，`ARM['gripper_timeout']=0.1` 秒限制应答等待。独立舵机驱动和自动探测的默认写入上限为 `SERVO['write_timeout']=1.0`。查询报错包含真实串口、波特率、目标 ID、指令、写入上限和耗时；收到的数据先从缓冲区读取，避免视觉后台初始化造成线程调度延迟时，已有回包仍被判成超时。正常通信立即返回，不固定等待 1 秒；只有 `pause` 的只读查询会在失败后继续尝试，舵机运动与扭矩指令不自动重发。
 
 机械臂 RS485 波特率为 921600，`ARM['serial_latency_ms']=1`。Linux FTDI 驱动的接收延时默认是 16 ms，普通用户通常无权修改；本机已安装 `udev/99-car-arm-latency.rules`，将机械臂适配器 `FTBVQPDL` 的接口 `00` 永久设为 1 ms，重启或 USB 重连后自动生效。换机部署时，从项目根目录安装：
 
@@ -128,7 +138,9 @@ sudo udevadm settle
 
 加减速参数在 `config.py`：普通直走和视觉直走共用 `STRAIGHT['ACCEL']=600.0` mm/s²、`KP_POS=4.0` s⁻¹；转弯使用 `TURN['ACCEL']=0.6` m/s²、`ANGULAR_ACCEL=6.0` rad/s²、`ANGLE_KP=3.0` s⁻¹。提高加速度限值会缩短参考速度的变化过程，提高位置／转角增益会让车辆更晚开始降速、缩短低速收尾。当前这五项为原参数的两倍，直走和转弯巡航速度由 `BASE` 配置，倒车校准速度由 `POSITION` 配置。`calibrate-position` 默认也使用直走加速度。制动提前时间用于补偿实车停车响应，应根据停车后的距离／角度误差实测调整；仿真耗时不能代表实车耗时。
 
-`vision-straight 距离` 有有效边界时使用视觉巡线，包括短距离和临近终点的运动。左右边界平均得到跑道中心线，在 `VISION_CONTROL['LOOKAHEAD']` 指定的画面高度比例处（当前 `0.7`，夹在有效边界范围内）取前视点；既修正车头方向，也修正车身横向偏移。出发时已有的偏移同样参与纠偏。内环默认用编码器 gap 估算角速度。
+`vision-straight 距离 [速度]` 的距离单位为米，可选速度单位为 mm/s，范围为 `(0, 1000]`。例如 `vision-straight 1 600` 以 600 mm/s 为巡航目标前进 1 米；省略速度时使用 `BASE['speed']`，指定速度只影响当前指令。起步仍按加速度限制提速，临近终点按剩余距离减速停车，视觉纠偏时左右轮速会有所不同。干跑打印当前指令采用的速度。
+
+有有效边界时使用视觉巡线，包括短距离和临近终点的运动。左右边界平均得到跑道中心线，在 `VISION_CONTROL['LOOKAHEAD']` 指定的画面高度比例处（当前 `0.7`，夹在有效边界范围内）取前视点；既修正车头方向，也修正车身横向偏移。出发时已有的偏移同样参与纠偏。内环默认用编码器 gap 估算角速度。
 
 行驶中视觉过期（`VISION_CONTROL['LOST_STOP']=0.6` s）或拿不到可用中心线时，切换 gap 盲走：以切换时的左右轮累计里程差为基准，使用编码器航向环保持当时车头方向，继续按剩余距离减速并在目标位置停车。进入盲走时清除旧视觉滤波和航向环积分，不继续使用过期图像转向。后台视觉仍被监测，连续 `GAP_RECOVERY_FRAMES=2` 个有效新帧后恢复视觉纠偏；重复、过期、乱序和缺边界的新帧不能凑足连续确认。可以多次丢失并恢复，每次丢失都会重新锁定当前 gap。CSV 的 `src=gap-blind` 表示临时盲走，此时画面几何列留空。盲走只能保持航向，不能矫正横向位置或执行摄像头横向偏移补偿；视觉恢复后继续纠偏。编码器断流、总时长超时、过大航向误差和取消仍会停车。出发前仍等待可用跑道中心线；`align` 的视觉丢失处理沿用原规则。
 
@@ -140,7 +152,7 @@ sudo udevadm settle
 
 二维码必须为三位 `1..3`：第一位选排爆物颜色，第二位选反恐靶颜色（1 红、2 绿、3 蓝），第三位选救援目标形状（1 圆柱形、2 圆锥形、3 腰鼓形）。目标识别要求三个候选完整、目标唯一、连续稳定，否则超时并停止。
 
-任务表的 `arm-calibrate` 读取四轴当前位置作为软件基准，并复用夹爪 TTL 串口给工具舵机 ID1 下发固定位置、使能扭矩。固定位置由 `SERVO['fixed_positions'][1]` 配置；退出和 `arm-disable` 保留该舵机的扭矩与目标。单独调用 `arm.calibrate()` 和角度调试仍只建立软件基准；需要同时固定 ID1 时调用 `arm.calibrate(hold_tool=True)`。初始逻辑角为 `0 0 160 24`；`home()` 等待回到本次初始姿态并连续到位。夹爪 ID2，张开 291°、闭合 243°，夹持时等待到位或实际朝目标运动后停稳，退出不自动松开物体。
+任务表的 `arm-calibrate` 读取四轴当前位置作为软件基准，并复用夹爪 TTL 串口给工具舵机 ID1 下发固定位置、使能扭矩。固定位置由 `SERVO['fixed_positions'][1]` 配置；正常退出保留该舵机的扭矩与目标，显式 `arm-disable` 则关闭工具舵机和夹爪的扭矩。单独调用 `arm.calibrate()` 和角度调试仍只建立软件基准；需要同时固定 ID1 时调用 `arm.calibrate(hold_tool=True)`。初始逻辑角为 `0 0 160 24`；`home()` 等待回到本次初始姿态并连续到位。夹爪 ID2，张开 291°、闭合 243°，夹持时等待到位或实际朝目标运动后停稳，退出不自动松开物体。
 
 任务表的 `arm-move`、`arm-home`、`home` 默认阻塞执行：四轴编码器误差均在 ±5° 内，并连续保持 0.2 秒才执行下一条指令；单次运动最多等待 30 秒。默认角度容差恢复旧版的 5°，允许例如 ID2 目标 0°、实际 −3.03° 时继续任务；该设置只改变完成判定，不消除实际位置偏差。如需更高精度，可降低 `ARM['arrival_tolerance_deg']`，但超出容差的偏差仍会导致超时。`ARM['arrival_speed_rpm']` 默认为 `None`，不以速度反馈作为完成门槛，避免已经到位却因位置保持时的非零速度反馈一直等待；如需同时检查转速，可设为正数，例如 `0.5` 表示各轴转速绝对值均须 ≤0.5 rpm。连续角度到位不代表瞬时速度必为零，运动完成后电机仍保持位置目标。超时报告各轴目标、实际角度、速度和当前到位条件并尝试失能四轴，任务不会继续。参数在 `ARM` 的 `arrival_tolerance_deg`、`arrival_speed_rpm`、`arrival_settle_seconds`、`move_timeout` 调整。自动调用的抓物体段继续沿用主线零点。任务间隔由 `STEP_GAP` 配置。
 

@@ -128,10 +128,13 @@ class Base:
                                           imu=imu, stop_event=self.stop_event)
         return self._require_success(result)
 
-    def vision_straight(self, distance, vision):
+    def vision_straight(self, distance, vision, speed=None):
         if not math.isfinite(distance) or distance <= 0:
             raise ValueError("视觉直走距离必须为有限正数")
-        cfg = vision_straight.VisionCfg(speed=self.config["speed"], track_mm=straight_pid.TRACK_MM,
+        speed = self.config["speed"] if speed is None else speed
+        if not 0 < speed <= 1000:
+            raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
+        cfg = vision_straight.VisionCfg(speed=speed, track_mm=straight_pid.TRACK_MM,
                                       lane_width_mm=VISION_CONTROL["LANE_WIDTH_MM"],
                                       lateral_offset_mm=VISION_CONTROL["LATERAL_OFFSET_MM"])
         if distance * 1000 <= cfg.gap_finish_mm:
@@ -139,6 +142,7 @@ class Base:
             heading = vision_straight.VisionHeading(cfg, vision)
         else:
             heading = self._heading(vision)
+            heading.cfg.speed = cfg.speed
             heading.cfg.lane_width_mm = cfg.lane_width_mm
             heading.cfg.lateral_offset_mm = cfg.lateral_offset_mm
             if heading.wait_track(stop_event=self.stop_event) is None:

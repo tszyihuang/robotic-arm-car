@@ -46,6 +46,7 @@ class Arm:
                     port=config.gripper_port, baudrate=config.gripper_baudrate,
                     servo_id=config.gripper_servo_id, speed=config.gripper_speed,
                     timeout=config.gripper_timeout, simulate=self._simulate,
+                    write_timeout=config.gripper_write_timeout,
                     release_on_close=config.gripper_release_on_close)
             return self._servo
 
@@ -82,6 +83,16 @@ class Arm:
 
     def _event(self, stop_event):
         return self.stop_event if stop_event is None else stop_event
+
+    def read_servo_angle(self, servo_id=1, *, stop_event=None):
+        """复用 TTL 连接读取指定舵机角度，不校准、不移动、不改变扭矩。"""
+        from .servo import SERVO_STEP_PER_DEG
+
+        event = self._event(stop_event)
+        check_cancel(event)
+        position = self._ensure_servo().read_position(servo_id=servo_id)
+        check_cancel(event)
+        return position / SERVO_STEP_PER_DEG
 
     @property
     def calibrated(self):
@@ -162,12 +173,16 @@ class Arm:
         return self._move(self._initial_joints, None, stop_event, wait)
 
     def disable(self):
-        if self._arm is not None:
-            self._arm.disable(include_gripper=False)
-        else:
-            # 独立失能只发送 RS485 停止指令，不依赖校准或编码器反馈。
-            self._ensure_bus().disable_all()
-        print("  机械臂 ID1-4 已失能")
+        """失能四轴、工具舵机和夹爪；无需校准，逐项尝试并报告失败。"""
+        servo_ids = sorted({1, self.config.gripper_servo_id})
+        # 按需连接两条总线，不读取四轴编码器或改变已有软件零点。
+        actions = [("机械臂四轴失能", lambda: self._ensure_bus().disable_all())]
+        for address in servo_ids:
+            actions.append((f"舵机 ID{address} 失能",
+                            lambda address=address: self._ensure_servo().disable_torque(servo_id=address)))
+        cleanup(*actions)
+        ids = "、".join(map(str, servo_ids))
+        print(f"  机械臂 ID1-4 与舵机 ID{ids} 已失能")
         return {"ok": True}
 
     def cancel(self):
