@@ -35,9 +35,11 @@ class ArmConfig:
                 or not 1 <= self.serial_latency_ms <= 255):
             raise ValueError("serial_latency_ms 必须是 [1, 255] 内的整数毫秒")
         for name in ("serial_timeout", "serial_write_timeout", "speed_rpm", "arrival_tolerance_deg",
-                     "move_timeout", "arrival_speed_rpm"):
+                     "move_timeout"):
             if finite(getattr(self, name), name) <= 0:
                 raise ValueError(f"{name} 必须大于 0")
+        if self.arrival_speed_rpm is not None and finite(self.arrival_speed_rpm, "arrival_speed_rpm") <= 0:
+            raise ValueError("arrival_speed_rpm 必须为 None 或正数")
         if finite(self.arrival_settle_seconds, "arrival_settle_seconds") < 0:
             raise ValueError("arrival_settle_seconds 不能小于 0")
         if not 0.01 <= self.speed_rpm <= 0xFFFFFFFF / 100:

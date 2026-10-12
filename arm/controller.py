@@ -187,9 +187,12 @@ class Arm:
                 raise ProtocolError("机械臂到位检查的速度反馈无效") from exc
             now = time.monotonic()
             check_cancel(stop_event)
-            arrived = all(abs(joints[a] - angle) <= self.config.arrival_tolerance_deg
-                          and abs(speeds[a]) <= self.config.arrival_speed_rpm
-                          for a, angle in target.items())
+            # 默认以编码器连续到位确认完成，避免保持位置时的非零速度反馈阻塞任务。
+            position_ok = all(abs(joints[a] - angle) <= self.config.arrival_tolerance_deg
+                              for a, angle in target.items())
+            speed_limit = self.config.arrival_speed_rpm
+            speed_ok = speed_limit is None or all(abs(speed) <= speed_limit for speed in speeds.values())
+            arrived = position_ok and speed_ok
             still_since = (now if still_since is None else still_since) if arrived else None
             if still_since is not None and now - still_since >= self.config.arrival_settle_seconds:
                 return
@@ -198,13 +201,15 @@ class Arm:
                 pending = '; '.join(f'ID{a} 目标 {angle:g}°，实际 {joints[a]:.2f}°，'
                                     f'误差 {joints[a] - angle:+.2f}°，速度 {speeds[a]:+.2f}rpm'
                                     for a, angle in target.items())
-                raise MotionTimeout(f'机械臂 {self.config.move_timeout:g}s 内未到位并停稳'
-                                    f'（容差 ±{self.config.arrival_tolerance_deg:g}°；{pending}）')
+                speed_requirement = '' if speed_limit is None else f'；转速 ≤{speed_limit:g}rpm'
+                raise MotionTimeout(f'机械臂 {self.config.move_timeout:g}s 内未满足到位条件'
+                                    f'（容差 ±{self.config.arrival_tolerance_deg:g}°'
+                                    f'{speed_requirement}；连续 {self.config.arrival_settle_seconds:g}s；{pending}）')
             wait_cancelable(min(.05, remaining), stop_event)
 
     def move_joints(self, joints, *, wait=True, speed_rpm=None, accel_rpm_s=None,
                     order="together", gripper=None, stop_event=None):
-        """四轴等时移动；默认等待编码器到位并停稳，可选夹爪开度 0..1。
+        """四轴等时移动；默认等待编码器连续到位，可选夹爪开度 0..1。
 
         order: together / plane-first / base-first；阻塞时等待前一段完成再发后一段。
         所有目标与协议参数在首条运动指令前校验。

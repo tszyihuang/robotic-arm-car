@@ -24,9 +24,9 @@ STRAIGHT = {
     "FORWARD_SIGN": (1, 1, 1, 1), "TRACK_MM": 190.0,
     "SPEED_CRUISE": 100.0, "SPEED_MIN": 60.0, "SPEED_LIMIT": 1000.0,
     # ACCEL 为加减速参考限值（mm/s²）；KP_POS 越大，越晚开始按剩余距离降速。
-    "ACCEL": 600.0, "MARGIN_MM": 5.0, "KP_POS": 4.0, "TRIM_MAX": 100.0,
-    "KP_GAP": 0.30, "KI_GAP": 0.20, "KD_GAP": 0.45, "GAP_DEV_MAX": 300.0,
-    "KP_SPD": 0.60, "KI_SPD": 0.80, "CORR_MAX": 40.0,
+    "ACCEL": 500.0, "MARGIN_MM": 5.0, "KP_POS": 3.0, "TRIM_MAX": 100.0,
+    "KP_GAP": 0.30, "KI_GAP": 0.0, "KD_GAP": 0.45, "GAP_DEV_MAX": 300.0,
+    "KP_SPD": 0.60, "KI_SPD": 0.0, "CORR_MAX": 40.0,
     "BRAKE_TAU": 0.12, "TEP_WINDOW": 0.010, "SPD_SAMPLES": 3,
 }
 
@@ -64,7 +64,7 @@ BALL_POSITION = {
     "min_speed": 35.0, "brake_tau": 0.04, "speed_window": 0.08,
     "accel": 100.0, "loop_hz": 100.0,
     "settle": 0.2, "speed_tolerance": 5.0,
-    "missing_frames": 3, "recovery_frames": 2,  # 连续缺球先暂停，恢复需完整的新帧确认。
+    "missing_frames": 3, "recovery_frames": 3,  # 连续缺球先暂停，恢复需完整的新帧确认。
     "lost_timeout": 2.0,  # s，无有效完整画面持续这么久才终止；过期画面仍停止运动。
     "max_distance_m": 0.3, "timeout": 30.0,
 }
@@ -82,7 +82,7 @@ VISION_CONTROL = {
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,  # 直走视觉过期后切换 gap；align 仍停车。
     "GAP_RECOVERY_FRAMES": 2,  # gap 盲走期间，连续有效新帧达到此数量后恢复视觉纠偏。
-    "KP_YAW": 5.0, "KI_YAW": 0.0, "YAW_W_MAX": 40.0,
+    "KP_YAW": 15.0, "KI_YAW": 0.5, "YAW_W_MAX": 40.0,
     "KP_RATE": 5.0, "KI_RATE": 0.0, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
     "GAP_FINISH_MM": 0.0,  # 0 = 全程视觉纠偏；正值 = 最后这段距离只用 gap 保持航向。
@@ -104,8 +104,10 @@ ARM = {
     "joint_signs": {1: 1, 2: 1, 3: -1, 4: 1},
     "joint_offsets_deg": {1: 0.0, 2: 0.0, 3: 160.0, 4: 24.0},
     "encoder_zero_deg": None, "speed_rpm": 10.0,
-    "arrival_tolerance_deg": 2.0, "move_timeout": 30.0,
-    "arrival_settle_seconds": 0.2, "arrival_speed_rpm": 0.5,
+    "arrival_tolerance_deg": 5.0,  # 恢复旧版到位容差；实际角度与目标相差不超过 5°。
+    "move_timeout": 30.0,
+    "arrival_settle_seconds": 0.2,
+    "arrival_speed_rpm": None,  # 默认按角度连续到位确认；填正数时额外检查转速（rpm）。
     "gripper_port": None, "gripper_baudrate": None, "gripper_servo_id": 2,
     "gripper_speed": 1000, "gripper_timeout": 0.1,
     "gripper_open_angle_deg": 291.0, "gripper_close_angle_deg": 243.0,

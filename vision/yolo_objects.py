@@ -1,4 +1,4 @@
-"""YOLO 物体检测：BGR 原始画面输入，原图坐标的检测框输出。"""
+"""YOLO 物体检测：BGR 输入，输出按置信度去除重叠的原图检测框。"""
 from __future__ import annotations
 
 import numpy as np
@@ -26,4 +26,13 @@ class ObjectPredictor(YoloPredictor):
                     continue
                 detections.append({"class_id": class_id, "name": self.names[class_id],
                                    "confidence": confidence, "box": xyxy.tolist()})
-        return {"detections": detections}
+        # 跨类别按置信度去重；有面积交集就抑制，边缘接触不算重叠。
+        kept = []
+        for detection in sorted(detections, key=lambda row: row["confidence"], reverse=True):
+            x1, y1, x2, y2 = detection["box"]
+            if any(max(x1, row["box"][0]) < min(x2, row["box"][2])
+                   and max(y1, row["box"][1]) < min(y2, row["box"][3])
+                   for row in kept):
+                continue
+            kept.append(detection)
+        return {"detections": kept}

@@ -89,8 +89,74 @@ class BlockingArmTests(unittest.TestCase):
         self.assertEqual(len(sent), 20)
         self.assertEqual(arm._arm.encoder_zero_deg, zero)
 
-    def test_target_position_without_stopped_speed_does_not_finish(self):
+    def test_arrived_arm_continues_despite_id3_speed_feedback(self):
         arm, _ = self.session()
+        arm.config.arrival_tolerance_deg = 2
+        arm.config.move_timeout = 1
+        arm.dry_run = True
+        feedback = {1: .18, 2: -.29, 3: -2.82, 4: 0}
+        for addr, motor in arm._bus.motors.items():
+            original_read = motor.read_status.side_effect
+
+            def read(addr=addr, original_read=original_read):
+                status = original_read()
+                status['speed_rpm'] = feedback[addr]
+                if addr == 3:
+                    status['multi_turn_deg'] -= .04
+                return status
+
+            motor.read_status.side_effect = read
+
+        execute(Step(1, 'arm-move', (6, 0, 160, 1)), None, arm, None)
+        self.assertGreaterEqual(self.clock.now, 100.5)
+        self.assertLess(self.clock.now, 101)
+        for addr, angle in enumerate((6, 0, 160, 1), 1):
+            self.assertAlmostEqual(arm._arm.get_joints()[addr], angle, delta=.05)
+        servo = arm._ensure_servo()
+        with patch.object(servo, 'move_angle', wraps=servo.move_angle) as close:
+            execute(Step(2, 'gripper-close', ()), None, arm, None)
+        close.assert_called_once()
+        self.assertTrue(all(motor.enabled for motor in arm._bus.motors.values()))
+
+    def test_id2_position_error_uses_configured_arrival_tolerance(self):
+        for tolerance, error, finishes in ((None, -3.03, True),
+                                           (2, -3.03, False),
+                                           (None, -5.03, False)):
+            with self.subTest(tolerance=tolerance, error=error):
+                arm, _ = self.session()
+                arm.config.move_timeout = 1
+                arm.dry_run = True
+                if tolerance is not None:
+                    arm.config.arrival_tolerance_deg = tolerance
+                feedback = {1: .46, 2: -.06, 3: .14, 4: -.24}
+                for addr, motor in arm._bus.motors.items():
+                    original_read = motor.read_status.side_effect
+
+                    def read(addr=addr, original_read=original_read, error=error):
+                        status = original_read()
+                        status['speed_rpm'] = feedback[addr]
+                        if addr == 2:
+                            status['multi_turn_deg'] += error
+                        return status
+
+                    motor.read_status.side_effect = read
+
+                started = self.clock.now
+                step = Step(1, 'arm-move', (-90, 0, 102, 91))
+                if finishes:
+                    execute(step, None, arm, None)
+                    self.assertGreaterEqual(self.clock.now - started + 1e-9, .5)
+                    self.assertLess(self.clock.now - started, 1)
+                    self.assertAlmostEqual(arm._arm.get_joints()[2], -3.03)
+                    self.assertTrue(all(motor.enabled for motor in arm._bus.motors.values()))
+                else:
+                    with self.assertRaisesRegex(MotionTimeout, 'ID2 目标 0°'):
+                        execute(step, None, arm, None)
+                    self.assertTrue(all(not motor.enabled for motor in arm._bus.motors.values()))
+
+    def test_optional_speed_check_waits_until_speed_is_below_limit(self):
+        arm, _ = self.session()
+        arm.config.arrival_speed_rpm = .5
         motor = arm._bus.motors[1]
         original_read = motor.read_status.side_effect
 
@@ -103,6 +169,38 @@ class BlockingArmTests(unittest.TestCase):
         motor.read_status.side_effect = read
         arm.home()
         self.assertGreaterEqual(self.clock.now, 100.8)
+
+    def test_optional_speed_check_times_out_on_persistent_speed_feedback(self):
+        arm, _ = self.session()
+        arm.config.arrival_speed_rpm = .5
+        arm.config.move_timeout = .5
+        motor = arm._bus.motors[3]
+        original_read = motor.read_status.side_effect
+
+        def read():
+            status = original_read()
+            status['speed_rpm'] = -2.82
+            return status
+
+        motor.read_status.side_effect = read
+        with self.assertRaisesRegex(MotionTimeout, r'ID3 目标 160°.*速度 -2.82rpm'):
+            arm.home()
+        self.assertTrue(all(not motor.enabled for motor in arm._bus.motors.values()))
+
+    def test_leaving_position_tolerance_restarts_arrival_confirmation(self):
+        arm, _ = self.session()
+        motor = arm._bus.motors[1]
+        original_read = motor.read_status.side_effect
+
+        def read():
+            status = original_read()
+            if 100.1 <= self.clock.now < 100.2:
+                status['multi_turn_deg'] += 6
+            return status
+
+        motor.read_status.side_effect = read
+        arm.home()
+        self.assertGreaterEqual(self.clock.now, 100.4)
 
     def test_timeout_prevents_next_step_and_reports_joint_feedback(self):
         arm, _ = self.session(blocked=True)
@@ -147,6 +245,11 @@ class BlockingArmTests(unittest.TestCase):
                 ArmConfig(**{key: 0})
         with self.assertRaises(ValueError):
             ArmConfig(arrival_settle_seconds=-1)
+
+    def test_speed_check_is_disabled_by_default_and_accepts_explicit_none(self):
+        self.assertIsNone(ArmConfig().arrival_speed_rpm)
+        self.assertIsNone(ArmConfig(arrival_speed_rpm=None).arrival_speed_rpm)
+        self.assertEqual(ArmConfig(arrival_speed_rpm=.5).arrival_speed_rpm, .5)
 
 
 class BlockingGripperTests(unittest.TestCase):

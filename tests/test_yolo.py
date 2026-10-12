@@ -78,3 +78,50 @@ class YoloTests(unittest.TestCase):
         detections = predictor._decode(result, (720, 1280))["detections"]
         self.assertEqual(detections, [{"class_id": 0, "name": "红球", "confidence": 0.9,
                                        "box": [10, 20, 30, 40]}])
+
+    def test_object_decoder_keeps_highest_confidence_for_any_overlap_and_class(self):
+        predictor = ObjectPredictor.__new__(ObjectPredictor)
+        predictor.names, predictor.threshold = {0: "红球", 1: "绿球"}, 0.25
+        winner = [10, 20, 30, 40, 0.9, 1]
+        for box in ([10, 20, 30, 40], [29, 39, 50, 60],
+                    [15, 25, 25, 35], [0, 0, 100, 100]):
+            for class_id in (0, 1):
+                for winner_first in (False, True):
+                    with self.subTest(box=box, class_id=class_id, winner_first=winner_first):
+                        rows = [winner, [*box, 0.8, class_id]]
+                        if not winner_first:
+                            rows.reverse()
+                        result = SimpleNamespace(boxes=SimpleNamespace(data=tensor(rows)))
+                        self.assertEqual(predictor._decode(result, (720, 1280))["detections"], [
+                            {"class_id": 1, "name": "绿球", "confidence": 0.9,
+                             "box": [10, 20, 30, 40]}])
+
+    def test_object_decoder_preserves_separate_boxes_and_touching_edges(self):
+        predictor = ObjectPredictor.__new__(ObjectPredictor)
+        predictor.names, predictor.threshold = {0: "红球"}, 0.25
+        boxes = [[10, 20, 30, 40], [30, 20, 50, 40], [10, 40, 30, 60],
+                 [30, 40, 50, 60], [60, 25, 80, 45], [15, 80, 35, 100]]
+        rows = [[*box, 0.9 - index * 0.1, 0] for index, box in enumerate(boxes)]
+        result = SimpleNamespace(boxes=SimpleNamespace(data=tensor(rows[::-1])))
+        detections = predictor._decode(result, (720, 1280))["detections"]
+        self.assertEqual([row["box"] for row in detections], boxes)
+
+    def test_object_decoder_rejected_box_does_not_suppress_another_object(self):
+        predictor = ObjectPredictor.__new__(ObjectPredictor)
+        predictor.names, predictor.threshold = {0: "红球"}, 0.25
+        result = SimpleNamespace(boxes=SimpleNamespace(data=tensor([
+            [40, 20, 60, 40, 0.7, 0], [25, 20, 45, 40, 0.8, 0],
+            [10, 20, 30, 40, 0.9, 0],
+        ])))
+        detections = predictor._decode(result, (720, 1280))["detections"]
+        self.assertEqual([row["box"] for row in detections],
+                         [[10, 20, 30, 40], [40, 20, 60, 40]])
+
+    def test_object_decoder_equal_confidence_keeps_first_box(self):
+        predictor = ObjectPredictor.__new__(ObjectPredictor)
+        predictor.names, predictor.threshold = {0: "红球", 1: "绿球"}, 0.25
+        result = SimpleNamespace(boxes=SimpleNamespace(data=tensor([
+            [10, 20, 30, 40, 0.9, 1], [10, 20, 30, 40, 0.9, 0],
+        ])))
+        detections = predictor._decode(result, (720, 1280))["detections"]
+        self.assertEqual([row["class_id"] for row in detections], [1])

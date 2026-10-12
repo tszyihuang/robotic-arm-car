@@ -11,12 +11,11 @@ straight 0.7     #过减速带
 calibrate-position  # 过减速带后校准，撞击后底盘四轮失能（零 PWM）
 turn 45 0.24
 turn 45 0
-vision-straight 0.5  #视觉校准1
-turn -87 0.35
-vision-straight 0.26
-turn -87 0.35
-vision-straight 0.35
-arm-calibrate
+vision-straight 0.48  #视觉校准1
+turn -87 0.36
+vision-straight 0.3
+turn -87 0.36
+vision-straight 0.37
 arm-move -90 55 74 89
 detect-balls
 calibrate-ball-position   #小球任务点校准
@@ -24,14 +23,14 @@ calibrate-ball-position   #小球任务点校准
 
 home
 
-vision-straight 1.76  #跑直线
+vision-straight 1.74  #跑直线
 
 arm-move -90 0 160 4
 detect-targets        #识别标靶
 打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
 home
 
-straight 0.28
+straight 0.23
 turn -87 0.36
 vision-straight 0.6
 
@@ -40,13 +39,13 @@ calibrate-object-position   #人质任务点校准
 人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
 
 home
-vision-straight 1.68
+vision-straight 1.66
 
 
 [抓中间的小球]
 gripper-open
 arm-move -99 37 110 62
-arm-move -99 124 141 -78
+arm-move -99 124 141 -81
 gripper-close
 arm-move -99 37 110 62
 arm-move 90 106 84.5 47.5
