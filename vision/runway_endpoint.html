@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跑道端点监视</title>
+<style>
+body{margin:24px auto;padding:0 16px;max-width:1280px;font:16px system-ui,sans-serif;background:#f4f5f7;color:#20252d}
+h1{font-size:24px;margin-bottom:8px}p{line-height:1.6}img{display:block;width:100%;height:auto;background:#20252d;border-radius:8px}
+#status{padding:12px;background:white;border-radius:8px;white-space:pre-wrap}.hint{color:#57616f;font-size:14px}
+</style>
+<h1>跑道端点监视</h1>
+<p class="hint">沿蓝色中心竖线从下往上找第一个灰→黄突变。绿色圆圈是稳定端点；橙色圆圈表示暂时保留旧点，正在确认或等待恢复。</p>
+<p id="status" aria-live="polite">等待画面…</p>
+<img id="view" alt="中心竖线与跑道端点监视画面">
+<script>
+const view=document.getElementById('view'),status=document.getElementById('status');
+const states={searching:'未找到端点',confirming:'首次连续确认',tracking:'稳定跟踪','jump-pending':'跳变待确认',held:'暂时保留旧点',stale:'画面已过期'};
+view.onerror=()=>setTimeout(()=>{view.src='/stream.mjpg?t='+Date.now()},1000);
+view.src='/stream.mjpg';
+async function refresh(){
+  try{
+    const response=await fetch('/api/status',{cache:'no-store'});
+    if(!response.ok)throw new Error('状态读取失败');
+    const data=await response.json(),point=data.point;
+    let message=(states[data.state]||data.state)+'  |  端点：'+(point?`(${point[0]}, ${point[1]})`:'—');
+    if(data.required_count)message+=`  |  连续确认：${data.pending_count}/${data.required_count}`;
+    if(data.candidate)message+=`\n本帧候选 y=${data.candidate.y}，色度变化 ${data.candidate.color_delta.toFixed(1)}，黄色变化 ${data.candidate.yellow_delta.toFixed(1)}`;
+    if(data.image_age!==null)message+=`  |  画面延迟 ${(Math.max(0,data.image_age)*1000).toFixed(0)} ms`;
+    status.textContent=message;
+    view.style.opacity=data.state==='stale'?'0.35':'1';
+  }catch(error){status.textContent='连接中断，等待恢复…';view.style.opacity='0.35'}
+  setTimeout(refresh,250);
+}
+refresh();
+</script>
+</html>

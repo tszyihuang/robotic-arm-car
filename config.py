@@ -142,6 +142,19 @@ VISION = {
     "objects_args": ROOT / "vision/models/objects/args.yaml",
 }
 
+RUNWAY_ENDPOINT = {
+    # 只分析中心一列；上下各取 window 个像素的 Lab 均值。
+    "window": 8,
+    "color_threshold": 6.0,  # Lab a、b 色度差，排除只有亮度变化的阴影。
+    "yellow_threshold": 4.0,  # 从下往上 b 分量至少增加此值。
+    "yellow_support": 0.75,  # 上窗口至少此比例的像素确实变黄，排除孤立噪点。
+    "stable_frames": 2, "jump_frames": 3,
+    "stable_tolerance_px": 60.0,  # 连续候选相对本轮首点的允许偏差。
+    "max_jump_px": 100.0,  # 超限先保持旧点，连续 jump_frames 个新帧后才切换。
+    "smoothing": 0.7,  # 正常移动的指数平滑系数；1 表示不平滑。
+    "lost_frames": 10,  # 缺失这么多新帧，或旧点超过 frame_stale，清除旧点。
+}
+
 TARGET_LOCK = {
     "motor2_angle_deg": 12.0,  # 跟踪期间由电机位置环保持的多圈编码器角度。
     # 瞄准前连续确认三色标靶；中心相对本轮首帧的漂移按画面宽、高归一化。

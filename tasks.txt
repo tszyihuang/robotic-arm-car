@@ -226,20 +226,7 @@ arm-disable
 [跑图]
 
 calibrate-position  # 过减速带后校准，撞击后底盘四轮失能（零 PWM）
-sleep 0.5  # 延时 0.5 秒后执行下一条指令
+sleep 0.5
 turn 45 0.25
-turn 44 0
-vision-straight 0.45  #视觉校准1
-turn -88 0.38
-vision-straight 0.31
-turn -88 0.38
-vision-straight 0.35
-arm-calibrate
-arm-move -90 55 74 89
-detect-balls
-
-straight 0.30
-turn 87 0.35
-turn -44 0.6
-turn -42 0
-straight 0.7     #过减速带
+turn 45 0
+vision-straight 0.46

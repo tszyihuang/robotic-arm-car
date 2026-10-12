@@ -190,8 +190,19 @@ python3 -m debug.angles --hz 5
 python3 -m debug.angles --hz 5 --duration 10 --json
 python3 tasks/detect_ball.py
 python3 tasks/lock_target.py
+python3 vision/runway_endpoint.py
 bash tests/run.sh -q
 ```
+
+`python3 vision/runway_endpoint.py` 独立识别跑道端点，并将带标记的监视画面推流到 `0.0.0.0:8081`。同一局域网浏览器访问终端打印的地址；本机访问 `http://127.0.0.1:8081`。也支持 `python3 -m vision.runway_endpoint` 和从其他目录运行脚本绝对路径。程序共用项目的摄像头采集和 MJPEG 推流协议，不加载 YOLO。
+
+每帧只取中心一列 `x=宽度//2`，从下往上比较上下各 8 个像素的 Lab 均值，同时检查色度差、黄色分量增加和上窗口的黄色像素占比。遇到第一个合格的灰→黄突变立即停止搜索，不标记更高处的突变；标记位置是比较窗口的分界行，受窗口大小影响可能相对实际边缘偏移数个像素。单纯亮暗阴影和孤立噪点不会作为灰→黄端点。
+
+首次连续 3 个新帧在首个候选 ±6 px 内才显示端点；正常移动使用指数平滑，超过 40 px 的跳变先截住并保留旧点，连续 5 个新帧确认同一新位置才切换。缺失、重复、乱序、过期、取帧超时或候选漂移超限会打断连续确认。连续缺失 10 帧，或旧点超过 `VISION['frame_stale']`（默认 0.6 s）没有重新匹配，清除旧点并重新确认。网页绿色圆圈表示当前稳定端点，橙色圆圈表示暂时保留的旧点；每帧最多标记一个点。坐标原点在左上角，`y` 向下增加。
+
+默认参数在 `config.py` 的 `RUNWAY_ENDPOINT`，均可通过命令行覆盖，例如 `python3 vision/runway_endpoint.py --color-threshold 6 --yellow-threshold 4 --max-jump-px 40 --jump-frames 5 --port 8081`；`--window`、`--stable-frames`、`--stable-tolerance-px`、`--smoothing`、`--lost-frames` 调整降噪与防抖。像素参数按实际分辨率计，默认值针对 1280×720。`--camera 0` 指定摄像头，`--hz 20` 限制最高识别及推流频率，`--duration 10` 运行 10 秒后退出。监视接口包括 `/stream.mjpg`、`/frame.jpg` 和 `/api/status`，多个浏览器共享一次识别与 JPEG 编码；按 `Ctrl+C` 或收到 `SIGTERM` 时关闭输入与网页。
+
+已有摄像头调试程序运行时，可以读取其原始推流，避免重复打开设备：`python3 vision/runway_endpoint.py --stream-url http://127.0.0.1:8080/stream.mjpg --port 8081`。请在原调试网页关闭模型开关，保证输入不含检测标记。网络输入后台只保留最新接收帧；其新鲜度按本机接收时间判断，远端摄像头的真实采集延迟由上游负责。
 
 `python3 tasks/detect_ball.py` 独立打开摄像头，只加载物体 YOLO 模型，默认推理完成立即打印并读取下一帧。终端显示模型路径与类别、每帧识别类别、置信度、中心坐标、小球数量、推理耗时和帧龄；三个球可排序时打印左、中、右颜色，缺球时持续显示当前结果。调试入口立即打印，不等待主线的连续稳定确认。按 `Ctrl+C` 退出并关闭摄像头。支持 `--camera 0`、`--device cpu`、`--conf 0.15`、`--once`；显式传入 `--hz 5` 可限制最高频率，`--image screenshots/图片.jpg` 可用已有图片检测一次。也可通过 `python3 -m tasks.detect_ball` 启动。
 
