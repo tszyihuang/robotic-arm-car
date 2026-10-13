@@ -1,10 +1,13 @@
 """用延迟到位反馈验证任务串行等待、夹持停稳、超时及取消。"""
 import contextlib
 import io
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import main
 from arm.api import Arm
 from arm.config import ArmConfig
 from arm.errors import MotionTimeout
@@ -387,6 +390,68 @@ class BlockingGripperTests(unittest.TestCase):
         self.assertGreaterEqual(self.clock.now + 1e-9, 100.7)
         self.assertEqual(self.servo._target, target)
         self.assertIsNone(arm._bus)
+
+    def test_light_timeout_after_one_second_preserves_torque_and_runs_next_tasks(self):
+        for position, moving, speed in ((4025, False, 0), (3000, True, 100)):
+            with self.subTest(position=position, moving=moving):
+                arm = Arm(simulate=True)
+                arm.dry_run = True
+                self.addCleanup(arm.close)
+                servo = arm._ensure_servo()
+                status = servo.status
+                target = round(arm.config.light_angle_deg * 4095 / 360)
+                started = self.clock.now
+                base, vision = Mock(dry_run=True), Mock()
+
+                def feedback():
+                    state = status()
+                    if servo._target == target:
+                        state.update(position=position, moving=moving, speed_raw=speed)
+                    return state
+
+                def next_task(distance):
+                    self.assertAlmostEqual(self.clock.now - started, 1.0)
+                    self.assertEqual(servo._target, target)
+                    self.assertTrue(status()['torque_enabled'])
+
+                base.straight.side_effect = next_task
+                with tempfile.TemporaryDirectory() as folder:
+                    path = Path(folder) / 'tasks.txt'
+                    path.write_text('[光]\nlight\nstraight 0.1\ngripper-close\n', encoding='utf-8')
+                    with patch.object(servo, 'status', side_effect=feedback), \
+                            patch.object(arm, '_stop_after_error', wraps=arm._stop_after_error) as stop, \
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        main.run(base, arm, vision, tasks_path=path, section='光')
+                base.straight.assert_called_once_with(.1)
+                stop.assert_not_called()
+                self.assertIn('1s 内未完成点灯动作，继续下一条指令', output.getvalue())
+                self.assertIn('[光 3/3] gripper-close', output.getvalue())
+                self.assertEqual(servo._target, round(arm.config.gripper_close_angle_deg * 4095 / 360))
+
+    def test_light_cancellation_still_releases_id2(self):
+        stop = threading.Event()
+        arm = Arm(simulate=True, stop_event=stop)
+        arm._servo = self.servo
+        self.addCleanup(arm.close)
+
+        def cancel(seconds, stop_event=None):
+            stop.set()
+            self.clock.wait(seconds, stop_event)
+
+        with patch.object(self.servo, 'status', return_value=self.state(3000)), \
+                patch('arm.servo.wait_cancelable', side_effect=cancel):
+            with self.assertRaises(MotionCancelled):
+                arm.light()
+        self.assertFalse(self.servo.status()['torque_enabled'])
+
+    def test_light_servo_fault_still_raises_and_releases_id2(self):
+        arm = Arm(simulate=True)
+        arm._servo = self.servo
+        self.addCleanup(arm.close)
+        with patch.object(self.servo, 'status', side_effect=ServoFault('舵机 ID2 过载')):
+            with self.assertRaisesRegex(ServoFault, 'ID2 过载'):
+                arm.light()
+        self.assertFalse(self.servo.status()['torque_enabled'])
 
     def test_open_waits_through_initial_idle_until_arrival_and_settling(self):
         def status():

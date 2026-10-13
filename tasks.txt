@@ -19,7 +19,7 @@ sleep 0.5
 turn 45 0.25
 turn 45 0
 go-ahead  
-turn -87 0.36
+turn -87 0.35
 go-ahead
 turn -87 0.36
 vision-straight 0.37
@@ -38,7 +38,7 @@ detect-targets        #识别标靶
 home
 
 go-ahead
-turn -87 0.37
+turn -87 0.35
 vision-straight 0.6
 
 arm-move -90 0 102 91
@@ -235,7 +235,12 @@ turn 45 0
 vision-straight 0.46
 
 [跑道尽头]
-go-ahead  # 视觉巡线前进，跑道尽头边界达到画面 y=292 时停车
+arm-calibrate
+go-ahead 275  # 视觉巡线前进，跑道尽头边界达到画面 y=300 时停车；可追加速度（mm/s）
+turn -87 0.36
+arm-disable
+
+
 
 [光]
 light  # 舵机 ID2 移到 353° 并等待到位

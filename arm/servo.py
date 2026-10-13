@@ -264,7 +264,8 @@ class FeetechSTSServo:
 
     def wait_for_arrival(self, target_position=None, *, tolerance=None, timeout=None,
                          settle_seconds=None, stop_event=None, allow_contact=False,
-                         initial_position=None, servo_id=None):
+                         initial_position=None, servo_id=None, raise_on_timeout=True):
+        """等待到位；raise_on_timeout=False 时超时返回 False 并保留目标与扭矩。"""
         address = self.servo_id if servo_id is None else _integer(servo_id, "舵机 ID", 0, 253)
         target = _integer(self._target if target_position is None else target_position,
                           "等待目标", 0, 4095)
@@ -304,6 +305,8 @@ class FeetechSTSServo:
                     return True
                 remaining = deadline - now
                 if remaining <= 0:
+                    if not raise_on_timeout:
+                        return False
                     raise MotionTimeout(f'舵机 ID{address} {timeout:g}s 内未完成动作'
                                         f'（目标 {target}，实际 {position}，'
                                         f'运动中 {state["moving"]}，速度 {state["speed_raw"]}）')

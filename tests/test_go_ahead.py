@@ -135,7 +135,7 @@ class EndpointStopTests(unittest.TestCase):
 
 
 class GoAheadMotionTests(unittest.TestCase):
-    def run_motion(self, frames, *, encoder_missing=False, stable_frames=2):
+    def run_motion(self, frames, *, encoder_missing=False, stable_frames=2, stop_y=292):
         clock = [100.0]
         camera = shared_camera()
         board = Mock()
@@ -164,7 +164,7 @@ class GoAheadMotionTests(unittest.TestCase):
         config = dict(DETECTOR_CONFIG, stable_frames=stable_frames)
         with patch.dict(BASE, meters_per_count=0.001), \
                 patch("base.vision_straight.time.time", side_effect=lambda: clock[0]):
-            endpoint = EndpointStop(camera, config=config, log=lambda _: None)
+            endpoint = EndpointStop(camera, stop_y=stop_y, config=config, log=lambda _: None)
             heading = lane_heading(clock[0])
             try:
                 result = vs.vision_straight(board, heading, stop_condition=endpoint, log=lambda _: None)
@@ -188,6 +188,16 @@ class GoAheadMotionTests(unittest.TestCase):
             self.assertNotEqual(command.args[0], command.args[2])
         self.assertEqual(commands[-1].args, (0, 0, 0, 0))
 
+    def test_selected_stop_row_keeps_moving_past_292_and_stops_at_300(self):
+        board, endpoint, (distance, info) = self.run_motion([270, 270, 292, 299, 300], stop_y=300)
+        self.assertFalse(info["reason"])
+        self.assertEqual(distance, 50)
+        self.assertEqual(endpoint.result["point"][1], 300)
+        self.assertEqual(len(board.spd.call_args_list), 5)
+        self.assertTrue(all(command.args != (0, 0, 0, 0)
+                            for command in board.spd.call_args_list[:-1]))
+        self.assertEqual(board.spd.call_args_list[-1], call(0, 0, 0, 0))
+
     def test_already_confirmed_boundary_stops_before_any_movement(self):
         board, _, (_, info) = self.run_motion([292], stable_frames=1)
         self.assertFalse(info["reason"])
@@ -205,31 +215,35 @@ class GoAheadMotionTests(unittest.TestCase):
 
 
 class GoAheadApiTests(unittest.TestCase):
-    def test_api_uses_shared_camera_without_distance_and_applies_selected_speed(self):
+    def test_api_uses_shared_camera_and_applies_selected_row_and_speed(self):
         base, vision = Base(), Mock()
+        base.config["go_ahead_stop_y"] = 310
+        base.config["go_ahead_speed"] = 200
         base.motor = Mock()
         heading = lane_heading(100.0)
         heading.wait_track = Mock(return_value=object())
-        speeds = []
+        settings = []
 
         def control(board, current_heading, *, stop_condition, **kwargs):
             self.assertIs(board, base.motor)
             self.assertIsNone(kwargs.get("goal_mm"))
             self.assertIs(stop_condition.camera, vision.start_camera.return_value)
-            self.assertEqual(stop_condition.stop_y, 292)
             self.assertIs(stop_condition.stop_event, base.stop_event)
             self.assertEqual(current_heading.cfg.lateral_offset_mm, VISION_CONTROL["LATERAL_OFFSET_MM"])
             self.assertEqual(current_heading.cfg.lane_width_mm, VISION_CONTROL["LANE_WIDTH_MM"])
-            speeds.append(current_heading.cfg.speed)
+            settings.append((stop_condition.stop_y, current_heading.cfg.speed))
             return 850, {"reason": ""}
 
         with patch.dict(VISION_CONTROL, LOG_DIR=None), \
                 patch.object(base, "_heading", return_value=heading), \
                 patch.object(vs, "vision_straight", side_effect=control):
-            self.assertTrue(base.go_ahead(vision, 600)["ok"])
+            self.assertTrue(base.go_ahead(vision, 300, 600)["ok"])
+            self.assertTrue(base.go_ahead(vision, 300)["ok"])
             result = base.go_ahead(vision)
         self.assertEqual(result["distance_m"], 0.85)
-        self.assertEqual(speeds, [600, BASE["speed"]])
+        self.assertEqual(settings, [(300, 600), (300, 200), (310, 200)])
+        self.assertEqual(base.config["go_ahead_stop_y"], 310)
+        self.assertEqual(base.config["go_ahead_speed"], 200)
         self.assertEqual(base.config["speed"], BASE["speed"])
 
     def test_invalid_speed_is_rejected_before_connecting(self):
@@ -237,7 +251,15 @@ class GoAheadApiTests(unittest.TestCase):
             with self.subTest(speed=speed):
                 base = Base()
                 with patch.object(base, "_heading") as prepare, self.assertRaisesRegex(ValueError, "速度"):
-                    base.go_ahead(Mock(), speed)
+                    base.go_ahead(Mock(), speed=speed)
+                prepare.assert_not_called()
+
+    def test_invalid_stop_row_is_rejected_before_connecting(self):
+        for stop_y in (-1, VISION["height"], VISION["height"] + 1, float("nan"), float("inf")):
+            with self.subTest(stop_y=stop_y):
+                base = Base()
+                with patch.object(base, "_heading") as prepare, self.assertRaisesRegex(ValueError, "停车行"):
+                    base.go_ahead(Mock(), stop_y)
                 prepare.assert_not_called()
 
     def test_control_failure_does_not_report_success(self):
@@ -260,23 +282,28 @@ class GoAheadTaskTests(unittest.TestCase):
                 main.run(base, DryArm(), vision, tasks_path=path, section="尽头测试")
             return output.getvalue()
 
-    def test_task_passes_shared_vision_and_speed_then_continues(self):
+    def test_task_passes_shared_vision_stop_row_and_speed_then_continues(self):
         base, vision = Mock(dry_run=True), Mock()
-        self.run_tasks("go-ahead\ngo-ahead 600\nstraight 0.3\n", base, vision)
-        self.assertEqual(base.go_ahead.call_args_list, [call(vision), call(vision, 600)])
+        self.run_tasks("go-ahead\ngo-ahead 300\ngo-ahead 300 600\ngo-ahead 0\nstraight 0.3\n", base, vision)
+        self.assertEqual(base.go_ahead.call_args_list,
+                         [call(vision), call(vision, 300), call(vision, 300, 600), call(vision, 0)])
         base.straight.assert_called_once_with(0.3)
         vision.start.assert_called_once_with()
         vision.close.assert_called_once_with()
 
     def test_dry_run_prints_threshold_and_speed_without_waiting(self):
-        output = self.run_tasks("go-ahead\ngo-ahead 600\n", DryBase(), DryVision())
-        self.assertIn(f"base.go_ahead(vision, {BASE['speed']:g} mm/s)", output)
-        self.assertIn("base.go_ahead(vision, 600 mm/s)", output)
-        self.assertIn("y ≥ 292px", output)
+        with patch.dict(BASE, go_ahead_stop_y=310, go_ahead_speed=200):
+            output = self.run_tasks("go-ahead\ngo-ahead 300\ngo-ahead 300 600\n", DryBase(), DryVision())
+        self.assertIn("base.go_ahead(vision, stop_y=310px, speed=200 mm/s)", output)
+        self.assertIn("base.go_ahead(vision, stop_y=300px, speed=200 mm/s)", output)
+        self.assertIn("base.go_ahead(vision, stop_y=300px, speed=600 mm/s)", output)
+        self.assertIn("y ≥ 310px", output)
+        self.assertIn("y ≥ 300px", output)
 
     def test_invalid_task_parameters_report_line_before_moving(self):
-        for command in ("go-ahead 1 2", "go-ahead 0", "go-ahead -1", "go-ahead 1001",
-                        "go-ahead nan", "go-ahead inf", "go-ahead 错误"):
+        for command in ("go-ahead 300 200 1", "go-ahead -1", f"go-ahead {VISION['height']}",
+                        "go-ahead nan", "go-ahead inf", "go-ahead 错误", "go-ahead 300 0",
+                        "go-ahead 300 -1", "go-ahead 300 1001", "go-ahead 300 nan", "go-ahead 300 inf"):
             with self.subTest(command=command):
                 base = Mock(dry_run=True)
                 with self.assertRaisesRegex(ValueError, "tasks.txt:3"):
@@ -285,4 +312,4 @@ class GoAheadTaskTests(unittest.TestCase):
 
     def test_task_file_provides_independent_go_ahead_section(self):
         steps = load_section(ROOT / "tasks.txt", "跑道尽头")
-        self.assertEqual([(step.command, step.args) for step in steps], [("go-ahead", ())])
+        self.assertEqual([(step.command, step.args) for step in steps], [("go-ahead", (300,))])

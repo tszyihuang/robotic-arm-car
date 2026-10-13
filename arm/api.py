@@ -215,10 +215,23 @@ class Arm:
                                  stop_event=stop_event, allow_contact=True)
 
     def light(self, *, stop_event=None):
-        """舵机 ID2 移到点灯角度并等待到位；无需校准四轴。"""
+        """舵机 ID2 点灯，最多等 1 秒，超时保留目标与扭矩并继续任务。"""
         if self.config.gripper_servo_id != 2:
             raise ValueError("light 使用舵机 ID2，请将 ARM['gripper_servo_id'] 设置为 2")
-        return self.move_gripper(self.config.light_angle_deg, stop_event=stop_event)
+        event = self._event(stop_event)
+        check_cancel(event)
+        try:
+            servo = self._ensure_servo()
+            target = servo.move_angle(self.config.light_angle_deg, stop_event=event)
+            arrived = servo.wait_for_arrival(target, timeout=1.0, stop_event=event,
+                                             raise_on_timeout=False)
+            check_cancel(event)
+        except BaseException:
+            self._stop_after_error()
+            raise
+        if not arrived:
+            print("  舵机 ID2 1s 内未完成点灯动作，继续下一条指令。", flush=True)
+        return {"ok": arrived, "timed_out": not arrived}
 
     def close(self):
         arm, servo, bus = self._arm, self._servo, self._bus

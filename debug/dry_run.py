@@ -36,10 +36,11 @@ class DryBase:
                        "有效后恢复视觉")
         print(f"base.vision_straight({distance:g} m, {speed:g} mm/s)  # {detail}")
 
-    def go_ahead(self, vision, speed=None):
-        speed = BASE['speed'] if speed is None else speed
-        print(f"base.go_ahead(vision, {speed:g} mm/s)  # 视觉巡线，"
-              "复用 runway_endpoint 端点检测，确认边界 y ≥ 292px 后停车")
+    def go_ahead(self, vision, stop_y=None, speed=None):
+        stop_y = BASE['go_ahead_stop_y'] if stop_y is None else stop_y
+        speed = BASE['go_ahead_speed'] if speed is None else speed
+        print(f"base.go_ahead(vision, stop_y={stop_y:g}px, speed={speed:g} mm/s)  # 视觉巡线，"
+              f"复用 runway_endpoint 端点检测，确认边界 y ≥ {stop_y:g}px 后停车")
 
     def stop(self):
         pass

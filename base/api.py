@@ -159,11 +159,14 @@ class Base:
         return self._require_success({"ok": not info["reason"],
                                       "distance_m": measured / 1000, "vision": info})
 
-    def go_ahead(self, vision, speed=None):
-        """沿跑道视觉前进，确认的尽头边界达到画面 y=292 时停车。"""
+    def go_ahead(self, vision, stop_y=None, speed=None):
+        """沿跑道视觉前进，确认的尽头边界达到指定画面 y 坐标时停车。"""
         from vision.runway_endpoint import EndpointStop
 
-        speed = self.config["speed"] if speed is None else speed
+        stop_y = self.config["go_ahead_stop_y"] if stop_y is None else stop_y
+        if not math.isfinite(stop_y) or not 0 <= stop_y < VISION["height"]:
+            raise ValueError(f"跑道尽头停车行必须为 [0, {VISION['height']}) 内的有限数值")
+        speed = self.config["go_ahead_speed"] if speed is None else speed
         if not 0 < speed <= 1000:
             raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
         heading = self._heading(vision)
@@ -172,7 +175,7 @@ class Base:
         heading.cfg.lateral_offset_mm = VISION_CONTROL["LATERAL_OFFSET_MM"]
         if heading.wait_track(stop_event=self.stop_event) is None:
             raise RuntimeError("出发前未拿到可用跑道中心线")
-        endpoint = EndpointStop(vision.start_camera(), stop_event=self.stop_event)
+        endpoint = EndpointStop(vision.start_camera(), stop_y=stop_y, stop_event=self.stop_event)
         log_path = None
         if VISION_CONTROL["LOG_DIR"] is not None:
             log_dir = Path(VISION_CONTROL["LOG_DIR"])

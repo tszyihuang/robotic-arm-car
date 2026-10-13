@@ -9,6 +9,8 @@ BASE = {
     "baudrate": 115200,
     "write_timeout": 1.0,  # 底盘串口单次写入最长等待秒数；原为固定 0.2 s。
     "speed": 300.0,  # 普通直走／视觉直走共用速度，mm/s；倒车校准独立配置。
+    "go_ahead_stop_y": 275.0,  # go-ahead 省略停车行时使用的原图 y 坐标（px）。
+    "go_ahead_speed": 300.0,  # go-ahead 省略速度时的默认速度（mm/s），可独立调节。
     "turn_speed": 250.0,
     "turn_spin_speed": 150.0,
     "turn_radius": 0.3,
@@ -76,16 +78,16 @@ VISION_CONTROL = {
     "FRAME_W": 1280, "FRAME_H": 720,
     "LOOKAHEAD": 0.7,  # 前视行占画面高度的比例，同时修正航向与横向偏移。
     "LANE_WIDTH_MM": 300.0,  # 左右跑道边界实际间距，mm；用于横向补偿的像素换算。
-    "LATERAL_OFFSET_MM": 15.0,  # vision-straight / go-ahead：正值向左偏，负值向右偏，0 = 画面居中。
+    "LATERAL_OFFSET_MM": 8,  # vision-straight / go-ahead：正值向左偏，负值向右偏，0 = 画面居中。
     "FOV_DEG": 70.0,
     "E_TAU": 0.12, "E_GATE": 10.0,
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,  # 直走视觉过期后切换 gap；align 仍停车。
     "GAP_RECOVERY_FRAMES": 2,  # gap 盲走期间，连续有效新帧达到此数量后恢复视觉纠偏。
-    "KP_YAW": 10.0, "KI_YAW": 1, "YAW_W_MAX": 40.0,
-    "KP_RATE": 10.0, "KI_RATE": 1, "KFF": 1.0, "KD_RATE": 0.0,
+    "KP_YAW": 30.0, "KI_YAW": 0.1, "YAW_W_MAX": 40.0,
+    "KP_RATE": 30.0, "KI_RATE": 0.1, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
-    "GAP_FINISH_Y_RATIO": 0.15,  # 两侧完整线段均在 y ≥ 此比例 × 原图高度时，关闭本趟视觉纠偏；0 关闭判断。
+    "MIN_BOUNDARY_LENGTH_PX": 100.0,  # 任一检出边界短于此原图像素长度时，该帧不用视觉纠偏；0 关闭过滤。
     "GAP_FINISH_MM": 0.0,  # 可选的剩余距离切换：0 关闭；正值 = 最后这段距离只用 gap 保持航向。
     "LOG_DIR": ROOT / "logs" / "vision-straight",  # 每次行驶保存控制 CSV；None 关闭。
 }

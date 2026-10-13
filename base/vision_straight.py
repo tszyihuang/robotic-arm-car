@@ -52,7 +52,7 @@ class VisionCfg:
     margin: float = STRAIGHT["MARGIN_MM"]
     kp_pos: float = STRAIGHT["KP_POS"]
     gap_finish_mm: float = VISION_CONTROL["GAP_FINISH_MM"]
-    gap_finish_y_ratio: float = VISION_CONTROL["GAP_FINISH_Y_RATIO"]
+    min_boundary_length_px: float = VISION_CONTROL["MIN_BOUNDARY_LENGTH_PX"]
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.lane_width_mm) or self.lane_width_mm <= 0:
@@ -63,8 +63,8 @@ class VisionCfg:
             raise ValueError("横向偏移补偿需要数值 LOOKAHEAD；vanishing 只能修正航向")
         if type(self.gap_recovery_frames) is not int or self.gap_recovery_frames <= 0:
             raise ValueError("GAP_RECOVERY_FRAMES 必须为正整数")
-        if not math.isfinite(self.gap_finish_y_ratio) or not 0 <= self.gap_finish_y_ratio <= 1:
-            raise ValueError("GAP_FINISH_Y_RATIO 必须为 0 到 1 之间的有限数")
+        if not math.isfinite(self.min_boundary_length_px) or self.min_boundary_length_px < 0:
+            raise ValueError("MIN_BOUNDARY_LENGTH_PX 必须为有限非负数")
 
     def size(self, info: dict | None) -> tuple[int, int]:
         """原帧尺寸：优先用 info 里模型报的 [宽,高]，没有就退回 720p 兜底值。"""
@@ -124,20 +124,21 @@ def _side_rec(rec: dict | None, cfg: VisionCfg, height: float):
     return a, b, min(y_far, y_near), max(y_far, y_near), angle
 
 
-def boundaries_below_finish(cfg: VisionCfg, info: dict | None) -> bool:
-    """两侧实际检出的完整线段都位于 y ≥ 阈值行；缺失端点不能用外推范围代替。"""
-    if cfg.gap_finish_y_ratio <= 0 or not valid_geometry(info):
+def has_short_boundary(cfg: VisionCfg, info: dict | None) -> bool:
+    """检查实际端点间的欧氏长度；一侧短边界就拒绝本帧，不用外推线段凑长度。"""
+    if cfg.min_boundary_length_px <= 0 or not valid_geometry(info):
         return False
     _, height = cfg.size(info)
-    threshold = cfg.gap_finish_y_ratio * height
     for name in ("left", "right"):
         rec = info.get(name)
         if rec is None or rec.get("near_y") is None or rec.get("far_y") is None:
-            return False
+            continue
         side = _side_rec(rec, cfg, height)
-        if side is None or not (threshold <= side[2] < side[3] <= height):
-            return False
-    return True
+        if side is not None:
+            dy = side[3] - side[2]
+            if math.hypot(side[0] * dy, dy) < cfg.min_boundary_length_px:
+                return True
+    return False
 
 
 def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
@@ -365,7 +366,8 @@ class VisionHeading:
         self._seq = 0
         self._seen_seq = 0
         self.new_sample = False    # 包括无边界的摄像头新帧，用于恢复时的连续帧计数。
-        self.boundary_finish = False  # 本拍的新鲜完整边界是否已越过关闭视觉纠偏的行。
+        self.short_boundary = False  # 当前帧是否因边界过短而拒绝；重读同一帧也不能纠偏。
+        self.n_short = 0
 
     # ---- 出发前检查跑道几何 ----
     def age(self, now=None) -> float:
@@ -423,7 +425,7 @@ class VisionHeading:
         self._yaw_frame = None
         # 减一：让第一拍就把当前这帧用上（车在静止等出发，这帧就是最新的）
         self._seq = self._seen_seq = self.cam.sample().seq - 1
-        self.boundary_finish = False
+        self.short_boundary = False
 
     # ---- 内部：误差的"现在值" ----
     def _yaw_at(self, t: float) -> float | None:
@@ -445,7 +447,7 @@ class VisionHeading:
         return e
 
     # ---- 每拍读一次 ----
-    def step(self, now: float | None = None) -> Heading | None:
+    def step(self, now: float | None = None, *, reject_short: bool = False) -> Heading | None:
         """读最新的一帧边界；挂了角速度来源（gap/陀螺）时每拍都外推到"现在"。"""
         now = time.time() if now is None else now
         yaw_now = 0.0
@@ -455,13 +457,16 @@ class VisionHeading:
         s = self.cam.sample()
         self.new_sample = s.seq != self._seen_seq
         self._seen_seq = s.seq
-        self.boundary_finish = False
+        if self.new_sample:
+            self.short_boundary = False
         new = False
         if s.info is not None and s.seq != self._seq and self.age(now) <= self.cfg.lost_stop:
             self._seq = s.seq
-            self.boundary_finish = (s.state == "ready" and not s.error
-                                    and min(s.t_valid, now - s.frame_dt) > self.t_frame
-                                    and boundaries_below_finish(self.cfg, s.info))
+            self.short_boundary = reject_short and has_short_boundary(self.cfg, s.info)
+            if self.short_boundary:
+                self.n_short += 1
+                self.view = None
+                return None
             v = track_view(self.cfg, s.info, self.half_px, self.ref)
             if v is None and (self.cfg.lookahead == "vanishing" or self.cfg.lateral_offset_mm):
                 # 新帧可能没有有效灭点/路宽；清掉旧结果，由控制侧选择 gap 或停车。
@@ -496,7 +501,7 @@ class VisionHeading:
                 self._yaw_frame = self._yaw_at(t_cap) if self.src is not None else None
                 self.t_frame = t_cap
                 self.e_raw, self.view = e_raw, v
-        if self.view is None:
+        if (reject_short and self.short_boundary) or self.view is None:
             return None
         self.e = self._predict(now, yaw_now)
         return Heading(e=self.e, e_raw=self.e_raw,
@@ -527,7 +532,7 @@ def prepare_heading(heading, imu=None):
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
                     log=print, log_path=None, stop_event=None, stop_condition=None):
-    """视觉巡线；边界越过阈值行或视觉丢失后用 gap 保持航向，按距离或端点停车。"""
+    """视觉巡线；短边界帧与视觉丢失时用 gap 保持航向，按距离或端点停车。"""
     rl = None
     stopped = False
     try:
@@ -548,8 +553,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         finish_gap_src = gap_src or WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
         # 短距离从起点保持航向；长距离在跨入末段时锁定新的 gap 基准。
         gap_ref = 0.0 if gap_only else None
-        finish_gap_trigger = "distance" if gap_only else None
         blind_gap_ref = None       # 临时盲走基准，与永久的末段 gap 基准分开。
+        blind_from_short = False   # 仅因短边界跳过画面时，下一张合格新帧立即恢复。
         recovery_frames = blind_switches = vision_recoveries = 0
         recovery_frame_time = 0.0
         wheels = WheelOdometry.read_origin(board, stop_event)
@@ -604,49 +609,48 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             if (cfg.gap_finish_mm > 0 and gap_ref is None and goal_mm is not None
                     and goal_mm - dist <= cfg.gap_finish_mm):
                 gap_ref = gap
-                finish_gap_trigger = "distance"
                 blind_gap_ref = None
                 loop.reset()  # 视觉积分不能带入新的编码器航向基准。
                 log(f"  剩余 {goal_mm - dist:.0f}mm，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
 
-            # ---- 完整边界越过阈值行后永久 gap；视觉失效时临时 gap ----
+            # ---- 短边界只跳过当前帧；视觉失效仍需连续新帧确认恢复 ----
             if gap_ref is None:
-                hd = heading.step(now)
+                hd = heading.step(now, reject_short=True)
                 visual_age = hd.age if hd is not None else heading.age(now)
                 lost_max = max(lost_max, visual_age)
                 usable = hd is not None and hd.absolute and visual_age <= cfg.lost_stop
-                if heading.boundary_finish:
-                    gap_ref = gap
-                    finish_gap_trigger = "boundary-y"
-                    blind_gap_ref = None
-                    loop.reset()
-                    log(f"  两侧完整跑道边界均位于 y≥{cfg.gap_finish_y_ratio:g}×画面高度，"
-                        f"关闭视觉纠偏，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
-                elif not usable:
+                short_frame = heading.short_boundary and visual_age <= cfg.lost_stop
+                if not usable:
                     recovery_frames = 0
                     if blind_gap_ref is None:
                         blind_gap_ref = gap
+                        blind_from_short = short_frame
                         recovery_frame_time = heading.t_frame
                         blind_switches += 1
                         loop.reset()
                         # 恢复时从新画面的误差重新滤波，避免旧视觉修正带入盲走/恢复。
                         heading.e_filt = None
                         heading._yaw_frame = None
-                        why = (f"连续 {visual_age:.1f}s 没有新边界"
+                        why = (f"边界短于 {cfg.min_boundary_length_px:g}px，该帧不使用视觉纠偏"
+                               if short_frame else f"连续 {visual_age:.1f}s 没有新边界"
                                if visual_age > cfg.lost_stop else "没有可用跑道中心线")
                         log(f"  {why}，切换 gap 盲走，保持当前航向，基准 gap={gap:+.1f}mm")
+                    elif not short_frame:
+                        blind_from_short = False  # 随后的过期/缺失需沿用正常恢复确认。
                 elif blind_gap_ref is not None:
                     if hd.new and heading.t_frame > recovery_frame_time:
                         recovery_frame_time = heading.t_frame
                         recovery_frames += 1
                     elif heading.new_sample:
                         recovery_frames = 0  # 缺失、过期、乱序或重复采集的帧打断连续确认。
-                    if recovery_frames >= cfg.gap_recovery_frames:
+                    required_frames = 1 if blind_from_short else cfg.gap_recovery_frames
+                    if recovery_frames >= required_frames:
                         blind_gap_ref = None
+                        blind_from_short = False
                         recovery_frames = 0
                         vision_recoveries += 1
                         loop.reset()
-                        log(f"  边界连续 {cfg.gap_recovery_frames} 帧有效，恢复视觉纠偏")
+                        log(f"  边界连续 {required_frames} 帧有效，恢复视觉纠偏")
 
             # ---- 航向反馈：视觉或 gap -> 角度误差 ----
             active_gap_ref = gap_ref if gap_ref is not None else blind_gap_ref
@@ -655,7 +659,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 # 编码器方向已由 FORWARD_SIGN 处理，不使用视觉的 dir_sign。
                 e_now = math.degrees((gap - active_gap_ref) / cfg.track_mm)
                 hd = Heading(e_now, e_now, 0.0, None,
-                             "gap" if gap_ref is not None else "gap-blind", True, 0.0, False)
+                             "gap" if gap_ref is not None else
+                             "gap-short" if blind_from_short else "gap-blind", True, 0.0, False)
                 rate, rate_valid = finish_gap_src.rate, finish_gap_src.valid
             else:
                 if cfg.rate_src == "gyro" and imu.age() > IMU_STALE:
@@ -782,9 +787,10 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 "trim_ff_avg": trim_ff_sum / trim_n if trim_n else 0.0,
                 "log_path": log_path, "rate_src": cfg.rate_src, "imu": imu is not None,
                 "heading_mode": ("gap" if gap_ref is not None else
+                                 "gap-short" if blind_gap_ref is not None and blind_from_short else
                                  "gap-blind" if blind_gap_ref is not None else "vision"),
                 "finish_gap_ref_mm": gap_ref, "blind_gap_ref_mm": blind_gap_ref,
-                "finish_gap_trigger": finish_gap_trigger,
+                "short_frames": heading.n_short,
                 "blind_switches": blind_switches, "vision_recoveries": vision_recoveries}
         return dist, info
 
