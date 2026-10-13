@@ -196,10 +196,11 @@ arm-calibrate
 arm-move -90 0 102 91
 calibrate-object-position 
 gripper-open
-arm-move -128 78 118 -50
-arm-move -128 110 134 -90
+arm-move -126 71 160 -63
+arm-move -126 111 136 -88
+sleep 0.5
 gripper-close
-arm-move -128 34 116 16
+arm-move -126 34 116 16
 arm-home
 arm-disable
 
@@ -209,10 +210,10 @@ arm-calibrate
 arm-move -90 0 102 91
 calibrate-object-position 
 gripper-open
-arm-move -94 62 136 -40
-arm-move -94 113 152 -110
+arm-move -95 26 160 -25
+arm-move -95 116 148 -110
 gripper-close
-arm-move -94 34 116 16
+arm-move -95 34 116 16
 arm-home
 arm-disable
 
