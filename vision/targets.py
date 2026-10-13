@@ -44,8 +44,9 @@ def ordered_candidates(candidates):
     return ordered
 
 
-def choose_position(candidates, value):
-    ordered = ordered_candidates(candidates)
+def choose_position(candidates, value, *, require_all=True):
+    ordered = (ordered_candidates(candidates) if require_all
+               else sorted(candidates, key=lambda row: row['center_x']))
     matches = [i for i, row in enumerate(ordered) if row['value'] == value]
     if len(matches) != 1:
         raise ValueError(f'目标 {value} 必须唯一，当前匹配 {len(matches)} 个')
@@ -58,7 +59,7 @@ def validate_target(kind, value):
 
 
 def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_timeout"], stable_frames=VISION["observe_stable_frames"],
-            stop_event=None, predict_lock=None, candidate_source=None):
+            stop_event=None, predict_lock=None, candidate_source=None, require_all=True):
     # 不指定颜色/形状时观察三个候选的左右顺序。
     layout_only = kind in ('ball', 'target', 'object') and value is None
     if not layout_only:
@@ -103,7 +104,7 @@ def observe(camera, kind, value, predictor=None, *, timeout=VISION["observe_time
                 if kind == 'target' and {row['value'] for row in ordered} != set(COLORS):
                     raise ValueError('需要完整看见红、绿、蓝三个标靶，且每种颜色唯一')
             else:
-                position, ordered = choose_position(candidates, value)
+                position, ordered = choose_position(candidates, value, require_all=require_all)
         except ValueError as exc:
             previous, count, reason = None, 0, str(exc)
             continue

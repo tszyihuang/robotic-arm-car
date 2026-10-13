@@ -18,9 +18,11 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
         steps = load_main(path) if section == "主线" else load_section(path, section)
         branches = load_branches(path, steps, section=section)
         mission = MissionState()
+        needs_rescue_position = any(step.command == "go-to-finish"
+                                    for plan in (steps, *branches.values()) for step in plan)
         check_cancel(stop_event)
         if section == "主线" or any(step.command in (
-                "scan-qrcode", "detect-balls", "detect-targets", "align", "vision-straight", "go-ahead",
+                "scan-qrcode", "detect-balls", "detect-targets", "align", "vision-straight", "go-ahead", "go-to-finish",
                 "calibrate-ball-position", "calibrate-object-position", *TASK_SECTIONS)
                 for plan in (steps, *branches.values()) for step in plan):
             vision.start()
@@ -42,8 +44,18 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
                             run_steps(branches[name], name, called=True, target_color=color)
                     else:
                         run_steps(branches[selected], selected, called=True, target_color=color)
+                    if step.command == "人质任务":
+                        mission.rescued_object_position = mission.object_initial_position
                 else:
-                    result = execute(step, base, arm, vision, stop_event=stop_event, target_color=target_color)
+                    execution_args = {}
+                    if step.command == "calibrate-object-position" and mission.goals is not None:
+                        execution_args["target_shape"] = mission.goals["object"]
+                        if needs_rescue_position:
+                            mission.observe_object_initial_position(vision, stop_event=stop_event)
+                    elif step.command == "go-to-finish":
+                        execution_args["finish_position"] = mission.rescued_object_position
+                    result = execute(step, base, arm, vision, stop_event=stop_event,
+                                     target_color=target_color, **execution_args)
                     mission.record(step.command, result)
 
         run_steps(steps, section)

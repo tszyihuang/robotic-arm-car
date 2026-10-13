@@ -99,11 +99,12 @@ class Base:
             stop_event=self.stop_event if stop_event is None else stop_event)
         return self._require_success(result)
 
-    def calibrate_object_position(self, vision, *, config=None, stop_event=None, log=print):
+    def calibrate_object_position(self, vision, *, target_shape=None, config=None, stop_event=None, log=print):
         self._connect()
+        kwargs = {} if target_shape is None else {"target_shape": target_shape}
         result = object_position.calibrate_object_position(
             self.motor, vision, config=config, log=log,
-            stop_event=self.stop_event if stop_event is None else stop_event)
+            stop_event=self.stop_event if stop_event is None else stop_event, **kwargs)
         return self._require_success(result)
 
     def _heading(self, vision):

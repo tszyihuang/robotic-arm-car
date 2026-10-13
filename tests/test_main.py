@@ -356,8 +356,14 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         self.assertIn("任务目标：排爆物=绿色，反恐靶=红色，救援目标=圆柱形", result.stdout)
         for name in ("抓左边的小球", "抓中间的小球", "抓右边的小球",
                      "打左边的靶", "打中间的靶", "打右边的靶",
-                     "抓左边的物体", "抓中间的物体", "抓右边的物体"):
+                     "抓中间的物体"):
             self.assertIn(f"条件分支预览：{name}", result.stdout)
+        self.assertIn("指定物品（cylinder）偏左 → 后退，偏右 → 前进", result.stdout)
+        self.assertIn("vision.observe_target('object', 'cylinder')", result.stdout)
+        self.assertIn("左边 1.84m，中间 1.69m，右边 1.54m", result.stdout)
+        for name in ("抓左边的物体", "抓右边的物体", "抓左物", "抓右物"):
+            self.assertNotIn(f"[{name}", result.stdout)
+            self.assertNotIn(name, main.list_sections(ROOT / "tasks.txt"))
 
     def test_actual_sigint_cancels_main_and_closes_all_devices(self):
         script = '''

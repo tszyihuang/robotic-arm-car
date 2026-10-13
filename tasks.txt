@@ -45,11 +45,11 @@ turn -87 0.35
 vision-straight 0.6
 
 arm-move -90 0 102 91
-calibrate-object-position   #人质任务点校准
-人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
+calibrate-object-position   # 按二维码第三位指定的形状，校准到目标物体前方
+人质任务                  # 校准成功后统一执行 [抓中间的物体]，夹住并回 home
 
 
-vision-straight 1.69
+go-to-finish  # 按目标物体校准前的位置视觉直走：左 1.84m、中 1.69m、右 1.54m
 arm-move 0 0 160 -130
 
 
@@ -107,15 +107,6 @@ light
 sleep 0.5
 gripper-close
 
-[抓左边的物体]
-arm-calibrate
-gripper-open
-arm-move -128 78 118 -50
-arm-move -128 110 134 -90
-gripper-close
-arm-move -128 34 116 16
-home
-
 [抓中间的物体]
 arm-calibrate
 gripper-open
@@ -123,15 +114,6 @@ arm-move -94 62 136 -40
 arm-move -94 113 152 -110
 gripper-close
 arm-move -94 34 116 16
-home
-
-[抓右边的物体]
-arm-calibrate
-gripper-open
-arm-move -60 82 121 -60
-arm-move -60 109 134 -83
-gripper-close
-arm-move -60 34 116 16
 home
 
 
@@ -191,20 +173,6 @@ gripper-open
 gripper-close
 arm-home
 
-[抓左物]
-arm-calibrate
-arm-move -90 0 102 91
-calibrate-object-position 
-gripper-open
-arm-move -126 71 160 -63
-arm-move -126 111 136 -88
-sleep 0.5
-gripper-close
-arm-move -126 34 116 16
-arm-home
-arm-disable
-
-
 [抓中物]
 arm-calibrate
 arm-move -90 0 102 91
@@ -214,18 +182,6 @@ arm-move -95 26 160 -25
 arm-move -95 116 148 -110
 gripper-close
 arm-move -95 34 116 16
-arm-home
-arm-disable
-
-[抓右物]
-arm-calibrate
-arm-move -90 0 102 91
-calibrate-object-position 
-gripper-open
-arm-move -60 82 121 -60
-arm-move -60 109 134 -83
-gripper-close
-arm-move -60 34 116 16
 arm-home
 arm-disable
 

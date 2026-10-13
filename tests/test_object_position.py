@@ -1,4 +1,4 @@
-"""物品校准：形状过滤、中间目标选择、连续运动和任务指令接入。"""
+"""物品校准：形状过滤、指定目标选择、连续运动和任务指令接入。"""
 import contextlib
 import io
 from itertools import permutations
@@ -25,10 +25,18 @@ class SimulatedObjectRobot(SimulatedRobot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.shapes = dict(zip(("red", "green", "blue"), ("cylinder", "cone", "drum")))
+        self.target_shape = None
 
     def object_layout(self, sample):
-        return {**sample, "candidates": [
-            {**row, "value": self.shapes[row["value"]]} for row in sample["candidates"]]}
+        candidates = [{**row, "value": self.shapes[row["value"]]} for row in sample["candidates"]]
+        if self.target_shape is not None and len(candidates) == 3:
+            # 仿真中间球提供连续变化的坐标；三个物品随底盘移动一起平移。
+            anchor = next(row["center_x"] for row in sample["candidates"] if row["value"] == "green")
+            shapes = list(self.shapes.values())
+            target_index = shapes.index(self.target_shape)
+            for row in candidates:
+                row["center_x"] = anchor + (shapes.index(row["value"]) - target_index) * 80
+        return {**sample, "candidates": candidates}
 
     def observe_object_layout(self, **kwargs):
         return self.object_layout(self.observe_ball_layout(**kwargs))
@@ -41,14 +49,94 @@ class SimulatedObjectRobot(SimulatedRobot):
         sample = self.object_layout_sample()
         return sample if sample["frame_index"] != after else None
 
-    def run(self, *, log=lambda _: None, **config):
+    def run(self, *, target_shape=None, log=lambda _: None, **config):
+        self.target_shape = target_shape
         with patch("base.ball_position.time.monotonic", side_effect=lambda: self.clock), \
                 patch("base.ball_position.time.time", side_effect=lambda: self.clock):
-            return calibrate_object_position(self, self, config=config,
+            return calibrate_object_position(self, self, target_shape=target_shape, config=config,
                                               stop_event=self.stop_event, log=log)
 
 
 class ObjectPositionTests(unittest.TestCase):
+    def test_centers_requested_shape_in_every_order_from_both_sides(self):
+        for shapes in permutations(("cylinder", "cone", "drum")):
+            for target_shape in shapes:
+                for error in (-80, 80):
+                    with self.subTest(shapes=shapes, target_shape=target_shape, error=error):
+                        robot = SimulatedObjectRobot(error, deadzone=25, coast_tau=0.4)
+                        robot.shapes = dict(zip(("red", "green", "blue"), shapes))
+                        result = robot.run(target_shape=target_shape, mm_per_px=0.25)
+                        self.assertTrue(result["ok"])
+                        self.assertEqual(result["shape"], target_shape)
+                        self.assertLessEqual(abs(result["error_px"]), OBJECT_POSITION["tolerance_px"])
+                        self.assertLessEqual(abs(result["position_error_mm"]),
+                                             OBJECT_POSITION["position_tolerance_mm"])
+                        moving = [values for _, values in robot.commands if any(values)]
+                        self.assertTrue(moving)
+                        self.assertTrue(all(value * error > 0 for value in moving[0]))
+                        self.assertEqual(robot.commands[-1][1], (0, 0, 0, 0))
+
+    def test_requested_object_already_centered_does_not_align_another_object(self):
+        robot = SimulatedObjectRobot(error=0, width=600)
+        result = robot.run(target_shape="drum")
+        self.assertEqual(result["shape"], "drum")
+        self.assertEqual(result["center_x"], 300)
+        self.assertTrue(all(not any(values) for _, values in robot.commands))
+
+    def test_requested_object_can_align_when_other_objects_are_out_of_view(self):
+        for error in (-80, 80):
+            with self.subTest(error=error):
+                robot = SimulatedObjectRobot(error=error)
+                object_layout = robot.object_layout
+
+                def only_requested_object(sample):
+                    layout = object_layout(sample)
+                    layout["candidates"] = [row for row in layout["candidates"] if row["value"] == "drum"]
+                    return layout
+
+                with patch.object(robot, "object_layout", side_effect=only_requested_object):
+                    result = robot.run(target_shape="drum", mm_per_px=0.25)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["shape"], "drum")
+                self.assertLessEqual(abs(result["error_px"]), OBJECT_POSITION["tolerance_px"])
+
+    def test_requested_object_loss_pauses_until_the_same_shape_reappears(self):
+        robot = SimulatedObjectRobot(error=80)
+        object_layout = robot.object_layout
+
+        def missing_requested_object(sample):
+            layout = object_layout(sample)
+            if 0.2 <= robot.clock - 100 < 0.4:
+                layout["candidates"] = [row for row in layout["candidates"] if row["value"] != "drum"]
+            return layout
+
+        with patch.object(robot, "object_layout", side_effect=missing_requested_object):
+            result = robot.run(target_shape="drum", mm_per_px=0.25)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["shape"], "drum")
+        stopped_at = next(stamp for stamp in robot.stops if 0.2 <= stamp - 100 < 0.4)
+        self.assertTrue(any(stamp > stopped_at and any(values) for stamp, values in robot.commands))
+
+    def test_missing_or_duplicate_requested_shape_cannot_align_a_different_shape(self):
+        for shapes in (("cone", "cone", "drum"), ("cylinder", "cylinder", "drum")):
+            with self.subTest(shapes=shapes):
+                robot = SimulatedObjectRobot()
+                robot.shapes = dict(zip(("red", "green", "blue"), shapes))
+                # 保留三个可见物品，但目标圆柱缺失或重复。
+                with patch.object(robot, "object_layout", side_effect=lambda sample: {
+                        **sample, "candidates": [
+                            {**row, "value": robot.shapes[row["value"]]} for row in sample["candidates"]]}):
+                    with self.assertRaisesRegex(TimeoutError, "缺物品"):
+                        robot.run(target_shape="cylinder")
+                self.assertTrue(all(not any(values) for _, values in robot.commands))
+
+    def test_invalid_requested_shape_stops_before_observing_or_moving(self):
+        robot = SimulatedObjectRobot()
+        with self.assertRaisesRegex(ValueError, "无效的目标"):
+            robot.run(target_shape="unknown")
+        self.assertEqual(robot.observe_count, 0)
+        self.assertTrue(all(not any(values) for _, values in robot.commands))
+
     def test_centers_the_spatial_middle_for_every_shape_order_from_both_sides(self):
         for shapes in permutations(("cylinder", "cone", "drum")):
             for error in (-120, 120):
@@ -122,6 +210,21 @@ class ObjectPositionTests(unittest.TestCase):
 
 
 class ObjectLayoutApiTests(unittest.TestCase):
+    def test_requested_shape_observation_can_start_with_one_visible_object(self):
+        camera, vision = ContinuousCamera(), Vision()
+        vision._object_model = Mock()
+        vision._object_model.predict.return_value = {"size": [600, 240], "detections": [
+            {"name": "圆柱", "box": [280, 10, 320, 50]},
+            {"name": "红球", "box": [180, 10, 220, 50]}]}
+        try:
+            with patch("vision.api.CameraStream", return_value=camera):
+                sample = vision.observe_object_layout(timeout=1, target_shape="cylinder")
+            self.assertEqual(sample["value"], "cylinder")
+            self.assertEqual([row["value"] for row in sample["candidates"]], ["cylinder"])
+            self.assertEqual(sample["size"], [600, 240])
+        finally:
+            vision.close()
+
     def test_new_object_layouts_reuse_background_model_and_ignore_balls(self):
         camera, vision = ContinuousCamera(), Vision()
         threads = []
@@ -195,6 +298,24 @@ class ObjectPositionTaskTests(unittest.TestCase):
         calibrate.assert_called_once_with(base.motor, vision, config=OBJECT_POSITION,
                                           log=None, stop_event=base.stop_event)
         base.motor.stop.assert_called()
+
+    def test_scanned_shape_reaches_base_controller_through_task_execution(self):
+        base, vision = Base(), Mock()
+        base.motor, base._imu_checked = Mock(), True
+        result = {"ok": True, "shape": "drum"}
+        with patch("base.api.object_position.calibrate_object_position", return_value=result) as calibrate, \
+                patch("tasks.runner.pause"):
+            self.assertEqual(execute(Step(1, "calibrate-object-position", ()), base, None, vision,
+                                     stop_event=base.stop_event, target_shape="drum"), result)
+        calibrate.assert_called_once_with(base.motor, vision, target_shape="drum", config=OBJECT_POSITION,
+                                          log=print, stop_event=base.stop_event)
+        base.motor.stop.assert_called()
+
+    def test_dry_run_reports_the_requested_shape(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            execute(Step(1, "calibrate-object-position", ()), DryBase(), None, DryVision(),
+                    target_shape="cone")
+        self.assertIn("指定物品（cone）偏左 → 后退，偏右 → 前进", output.getvalue())
 
     def test_selected_object_section_starts_vision_and_runs_before_home(self):
         base, arm, vision = Mock(), Mock(), Mock()

@@ -8,6 +8,7 @@ from . import detect_ball
 from . import detect_target
 from . import calibrate_ball_position
 from . import calibrate_object_position
+from . import go_to_finish
 from . import wait_continue
 from .mission import TASK_SECTIONS
 from base.control import check_cancel, wait_cancelable
@@ -33,6 +34,7 @@ COMMANDS = {
     "calibrate-object-position": ("base", "calibrate_object_position", (0,)),
     "align": ("base", "align", (0,)),
     "vision-straight": ("base", "vision_straight", (1, 2)),
+    "go-to-finish": ("base", "vision_straight", (0,)),
     "go-ahead": ("base", "go_ahead", (0, 1, 2)),
     "arm-calibrate": ("arm", "calibrate", (0,)),
     "arm-disable": ("arm", "disable", (0,)),
@@ -142,7 +144,8 @@ def load_branches(path, steps, *, section="主线"):
     return branches
 
 
-def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
+def execute(step, base, arm, vision, *, stop_event=None, target_color=None, target_shape=None,
+            finish_position=None):
     check_cancel(stop_event)
     if step.command == "pause":
         if not getattr(base, "dry_run", False):
@@ -171,7 +174,10 @@ def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
     elif step.command == "calibrate-ball-position":
         result = calibrate_ball_position.run(base, vision, stop_event=stop_event)
     elif step.command == "calibrate-object-position":
-        result = calibrate_object_position.run(base, vision, stop_event=stop_event)
+        kwargs = {} if target_shape is None else {"target_shape": target_shape}
+        result = calibrate_object_position.run(base, vision, stop_event=stop_event, **kwargs)
+    elif step.command == "go-to-finish":
+        result = go_to_finish.run(base, vision, position=finish_position)
     elif step.command in LOCK_TARGET_COMMANDS:
         from . import lock_target
         selector = LOCK_TARGET_COMMANDS[step.command] if target_color is None else target_color

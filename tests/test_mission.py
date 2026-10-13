@@ -16,8 +16,8 @@ from tasks.lock_target import TargetLock
 
 SECTIONS = ("抓左边的小球", "抓中间的小球", "抓右边的小球",
             "打左边的靶", "打中间的靶", "打右边的靶",
-            "抓左边的物体", "抓中间的物体", "抓右边的物体")
-ANGLES = (11, 12, 13, 21, 22, 23, 31, 32, 33)
+            "抓中间的物体")
+ANGLES = (11, 12, 13, 21, 22, 23, 32)
 POSITIONS = ("left", "middle", "right")
 COLORS = ("red", "green", "blue")
 SHAPES = ("cylinder", "cone", "drum")
@@ -69,40 +69,138 @@ class MissionDispatchTests(unittest.TestCase):
         arm.close.assert_called_once_with()
         vision.close.assert_called_once_with()
 
-    def test_all_codes_and_arrangements_execute_one_branch_per_task_then_resume(self):
+    def test_all_codes_and_color_arrangements_calibrate_rescue_then_execute_middle_grab(self):
         table = task_table("scan-qrcode\ndetect-balls\n小球任务\nstraight 0.25\n"
-                           "detect-targets\n打靶任务\nstraight 0.5\n人质任务\nstraight 0.75")
-        color_orders, shape_orders = list(permutations(COLORS)), list(permutations(SHAPES))
+                           "detect-targets\n打靶任务\nstraight 0.5\n"
+                           "calibrate-object-position\n人质任务\nstraight 0.75")
+        color_orders = list(permutations(COLORS))
         for digits in product("123", repeat=3):
             for i, balls in enumerate(color_orders):
-                targets, objects = color_orders[5 - i], shape_orders[(i + 2) % 6]
+                targets = color_orders[5 - i]
                 qr = "".join(digits)
-                with self.subTest(qr=qr, balls=balls, targets=targets, objects=objects):
+                with self.subTest(qr=qr, balls=balls, targets=targets):
                     base, arm, vision = self.devices()
                     vision.scan_qrcode.return_value = qr
                     vision.observe_balls.return_value = layout(balls)
                     vision.observe_targets.return_value = layout(targets)
                     shape = SHAPES[int(digits[2]) - 1]
-                    object_index = objects.index(shape)
-                    vision.observe_target.return_value = POSITIONS[object_index]
                     trace = Mock()
                     for device, method, name in ((vision, "scan_qrcode", "scan"),
                                                   (vision, "observe_balls", "balls"),
                                                   (vision, "observe_targets", "targets"),
-                                                  (vision, "observe_target", "object"),
                                                   (arm, "move_joints", "move"),
                                                   (base, "straight", "drive")):
                         trace.attach_mock(getattr(device, method), name)
-                    self.run_plan(table, base, arm, vision)
+                    with patch("tasks.runner.calibrate_object_position.run",
+                               return_value={"ok": True, "shape": shape}) as calibration:
+                        trace.attach_mock(calibration, "object")
+                        self.run_plan(table, base, arm, vision)
                     ball_angle = 11 + balls.index(COLORS[int(digits[0]) - 1])
                     target_angle = 21 + targets.index(COLORS[int(digits[1]) - 1])
                     self.assertEqual(trace.mock_calls, [
                         call.scan(), call.balls(), call.move(ball_angle, 0, 160, 24),
                         call.drive(0.25), call.targets(), call.move(target_angle, 0, 160, 24),
-                        call.drive(0.5), call.object("object", shape),
-                        call.move(31 + object_index, 0, 160, 24), call.drive(0.75)])
+                        call.drive(0.5), call.object(base, vision, stop_event=None, target_shape=shape),
+                        call.move(32, 0, 160, 24), call.drive(0.75)])
+                    vision.observe_target.assert_not_called()
                     vision.start.assert_called_once_with()
                     self.assert_cleaned(base, arm, vision)
+
+    def test_finish_distance_uses_original_position_for_each_qr_shape_after_home(self):
+        table = task_table("scan-qrcode\ncalibrate-object-position\n人质任务\ngo-to-finish\nstraight 0.1")
+        for position, distance in (("left", 1.84), ("middle", 1.69), ("right", 1.54)):
+            for digit, shape in zip("123", SHAPES):
+                with self.subTest(position=position, shape=shape):
+                    base, arm, vision = self.devices()
+                    vision.scan_qrcode.return_value = "11" + digit
+                    vision.observe_target.return_value = position
+                    trace = Mock()
+                    trace.attach_mock(vision.observe_target, "observe")
+                    trace.attach_mock(arm.move_joints, "grab")
+                    trace.attach_mock(arm.home, "home")
+                    trace.attach_mock(base.vision_straight, "finish")
+                    trace.attach_mock(base.straight, "resume")
+                    with patch("tasks.runner.calibrate_object_position.run",
+                               return_value={"ok": True, "shape": shape}) as calibration:
+                        trace.attach_mock(calibration, "calibrate")
+                        self.run_plan(table, base, arm, vision)
+                    self.assertEqual(trace.mock_calls, [
+                        call.observe("object", shape),
+                        call.calibrate(base, vision, stop_event=None, target_shape=shape),
+                        call.grab(32, 0, 160, 24), call.home(),
+                        call.finish(distance, vision), call.resume(0.1)])
+                    self.assert_cleaned(base, arm, vision)
+
+    def test_unknown_original_object_position_stops_before_calibration_or_finish(self):
+        for position, error in ((None, None), ("unknown", None), (None, TimeoutError("观察超时"))):
+            with self.subTest(position=position, error=error):
+                base, arm, vision = self.devices()
+                vision.observe_target.return_value = position
+                vision.observe_target.side_effect = error
+                with patch("tasks.runner.calibrate_object_position.run") as calibration, \
+                        self.assertRaises(TimeoutError if error else ValueError):
+                    self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\ngo-to-finish"),
+                                  base, arm, vision)
+                calibration.assert_not_called()
+                arm.move_joints.assert_not_called()
+                base.vision_straight.assert_not_called()
+                self.assert_cleaned(base, arm, vision)
+
+    def test_finish_requires_completed_rescue_and_rescanning_clears_previous_route(self):
+        for commands in ("go-to-finish", "scan-qrcode\ncalibrate-object-position\ngo-to-finish",
+                         "scan-qrcode\ncalibrate-object-position\n人质任务\nscan-qrcode\ngo-to-finish"):
+            with self.subTest(commands=commands):
+                base, arm, vision = self.devices()
+                base.dry_run = False
+                with patch("tasks.runner.calibrate_object_position.run",
+                           return_value={"ok": True, "shape": "cylinder"}), \
+                        self.assertRaisesRegex(ValueError, "go-to-finish"):
+                    self.run_plan(task_table(commands), base, arm, vision)
+                base.vision_straight.assert_not_called()
+                self.assert_cleaned(base, arm, vision)
+
+    def test_new_rescue_replaces_previous_original_position_for_finish(self):
+        base, arm, vision = self.devices()
+        vision.scan_qrcode.side_effect = ["211", "213"]
+        vision.observe_target.side_effect = ["left", "right"]
+        with patch("tasks.runner.calibrate_object_position.run", side_effect=[
+                {"ok": True, "shape": "cylinder"}, {"ok": True, "shape": "drum"}]):
+            self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\n"
+                                     "scan-qrcode\ncalibrate-object-position\n人质任务\ngo-to-finish"),
+                          base, arm, vision)
+        self.assertEqual(vision.observe_target.call_args_list,
+                         [call("object", "cylinder"), call("object", "drum")])
+        base.vision_straight.assert_called_once_with(1.54, vision)
+        self.assert_cleaned(base, arm, vision)
+
+    def test_cancel_during_original_position_observation_prevents_calibration_and_finish(self):
+        base, arm, vision = self.devices()
+        stop = threading.Event()
+
+        def cancel(*args):
+            stop.set()
+            return "right"
+
+        vision.observe_target.side_effect = cancel
+        with patch("tasks.runner.calibrate_object_position.run") as calibration, \
+                self.assertRaises(MotionCancelled):
+            self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\ngo-to-finish"),
+                          base, arm, vision, stop_event=stop)
+        calibration.assert_not_called()
+        arm.move_joints.assert_not_called()
+        base.vision_straight.assert_not_called()
+        self.assert_cleaned(base, arm, vision)
+
+    def test_failed_grab_cannot_drive_to_finish(self):
+        base, arm, vision = self.devices()
+        arm.move_joints.side_effect = OSError("抓取失败")
+        with patch("tasks.runner.calibrate_object_position.run",
+                   return_value={"ok": True, "shape": "cylinder"}), \
+                self.assertRaisesRegex(OSError, "抓取失败"):
+            self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\ngo-to-finish"),
+                          base, arm, vision)
+        base.vision_straight.assert_not_called()
+        self.assert_cleaned(base, arm, vision)
 
     def test_invalid_qr_payload_stops_before_next_route_action(self):
         for qr in (None, 211, "012", "234", "11", "1111", "２１１", "123+321"):
@@ -118,6 +216,7 @@ class MissionDispatchTests(unittest.TestCase):
         for commands, message in (("小球任务", "scan-qrcode"),
                                   ("打靶任务", "scan-qrcode"),
                                   ("人质任务", "scan-qrcode"),
+                                  ("scan-qrcode\n人质任务", "calibrate-object-position"),
                                   ("scan-qrcode\n小球任务", "detect-balls"),
                                   ("scan-qrcode\n打靶任务", "detect-targets")):
             with self.subTest(commands=commands):
@@ -176,33 +275,74 @@ class MissionDispatchTests(unittest.TestCase):
                 arm.move_joints.assert_not_called()
                 self.assert_cleaned(base, arm, vision)
 
-    def test_failed_rescue_observation_stops_before_grab_or_route(self):
-        for position, error in ((None, None), ("unknown", None), (None, TimeoutError("观察超时"))):
-            with self.subTest(position=position, error=error):
+    def test_failed_or_wrong_rescue_calibration_stops_before_grab_or_route(self):
+        for result, error in ((None, None), ({"ok": False, "shape": "cylinder"}, None),
+                              ({"ok": True, "shape": "cone"}, None),
+                              (None, TimeoutError("校准超时"))):
+            with self.subTest(result=result, error=error):
                 base, arm, vision = self.devices()
-                vision.observe_target.return_value = position
-                vision.observe_target.side_effect = error
-                with self.assertRaises(TimeoutError if error else ValueError):
-                    self.run_plan(task_table("scan-qrcode\n人质任务\nstraight 1"), base, arm, vision)
+                with patch("tasks.runner.calibrate_object_position.run", return_value=result,
+                           side_effect=error), self.assertRaises(TimeoutError if error else ValueError):
+                    self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\nstraight 1"),
+                                  base, arm, vision)
                 arm.move_joints.assert_not_called()
                 base.straight.assert_not_called()
                 self.assert_cleaned(base, arm, vision)
 
-    def test_cancel_after_rescue_observation_prevents_branch_motion(self):
+    def test_cancel_after_rescue_calibration_prevents_branch_motion(self):
         base, arm, vision = self.devices()
         stop = threading.Event()
 
-        def cancel(*args):
+        def cancel(*args, **kwargs):
             stop.set()
-            return "middle"
+            return {"ok": True, "shape": "cylinder"}
 
-        vision.observe_target.side_effect = cancel
-        with self.assertRaises(MotionCancelled):
-            self.run_plan(task_table("scan-qrcode\n人质任务\nstraight 1"),
+        with patch("tasks.runner.calibrate_object_position.run", side_effect=cancel), \
+                self.assertRaises(MotionCancelled):
+            self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n人质任务\nstraight 1"),
                           base, arm, vision, stop_event=stop)
         arm.move_joints.assert_not_called()
         base.straight.assert_not_called()
         self.assert_cleaned(base, arm, vision)
+
+    def test_rescanning_invalidates_previous_object_calibration(self):
+        base, arm, vision = self.devices()
+        vision.scan_qrcode.side_effect = ["211", "211"]
+        with patch("tasks.runner.calibrate_object_position.run",
+                   return_value={"ok": True, "shape": "cylinder"}), \
+                self.assertRaisesRegex(ValueError, "calibrate-object-position"):
+            self.run_plan(task_table("scan-qrcode\ncalibrate-object-position\n"
+                                     "scan-qrcode\n人质任务\nstraight 1"), base, arm, vision)
+        arm.move_joints.assert_not_called()
+        base.straight.assert_not_called()
+        self.assert_cleaned(base, arm, vision)
+
+    def test_middle_object_grab_keeps_gripper_closed_and_returns_to_home(self):
+        base, _, vision = self.devices()
+        arm = Arm(simulate=True)
+        arm.dry_run = True
+        home = arm.home
+
+        def check_home():
+            home()
+            self.assertEqual(arm._arm.get_joints(), arm.config.joint_offsets_deg)
+            self.assertAlmostEqual(arm._servo.status(servo_id=2)["angle_deg"],
+                                   arm.config.gripper_close_angle_deg, delta=0.1)
+
+        text = "[主线]\nscan-qrcode\ncalibrate-object-position\n人质任务\n"
+        text += "[抓中间的物体]\n" + "\n".join(
+            " ".join((step.command, *(f"{arg:g}" for arg in step.args)))
+            for step in main.load_section(main.TASKS_FILE, "抓中间的物体"))
+        with patch("tasks.runner.calibrate_object_position.run",
+                   return_value={"ok": True, "shape": "cylinder"}), \
+                patch.object(arm, "home", side_effect=check_home) as home_call, \
+                patch.object(arm, "open_gripper", wraps=arm.open_gripper) as opening, \
+                patch.object(arm, "close_gripper", wraps=arm.close_gripper) as closing:
+            self.run_plan(text, base, arm, vision)
+        home_call.assert_called_once_with()
+        opening.assert_called_once_with()
+        closing.assert_called_once_with()
+        vision.observe_target.assert_not_called()
 
     def test_action_failure_stops_parent_route_and_cleans_up_shared_devices(self):
         base, arm, vision = self.devices()
@@ -245,23 +385,27 @@ class MissionDispatchTests(unittest.TestCase):
         arm.dry_run = True
         text = main.TASKS_FILE.read_text(encoding="utf-8")
         with patch("tasks.lock_target.run_task", return_value={"ok": True}) as lock, \
+                patch("tasks.runner.calibrate_object_position.run",
+                      return_value={"ok": True, "shape": "cylinder"}) as calibration_task, \
                 patch.object(arm, "calibrate", wraps=arm.calibrate) as calibration, \
                 patch.object(arm, "move_joints", wraps=arm.move_joints) as moves:
             output = self.run_plan(text, base, arm, vision)
-        for selected in ("抓中间的小球", "打左边的靶", "抓右边的物体"):
+        for selected in ("抓中间的小球", "打左边的靶", "抓中间的物体"):
             self.assertIn(f"[{selected} 1/", output)
         for unselected in ("抓左边的小球", "抓右边的小球", "打中间的靶",
-                           "打右边的靶", "抓左边的物体", "抓中间的物体"):
+                           "打右边的靶", "抓左边的物体", "抓右边的物体"):
             self.assertNotIn(f"[{unselected} 1/", output)
         calibration.assert_called_once_with(hold_tool=True)
         recorded_moves = iter(moves.call_args_list)
-        for name in ('抓中间的小球', '抓右边的物体'):
+        for name in ('抓中间的小球', '抓中间的物体'):
             for step in main.load_section(main.TASKS_FILE, name):
                 if step.command == 'arm-move':
                     expected = call(*step.args)
                     self.assertTrue(any(recorded == expected for recorded in recorded_moves), expected)
         self.assertEqual(lock.call_args.args, (arm, vision, "red"))
+        calibration_task.assert_called_once_with(base, vision, stop_event=None, target_shape="cylinder")
         vision.observe_target.assert_called_once_with("object", "cylinder")
+        self.assertEqual(base.vision_straight.call_args_list[-1], call(1.54, vision))
         steps = main.load_main(main.TASKS_FILE)
         last = steps[-1]
         args = ' '.join(f'{value:g}' for value in last.args)

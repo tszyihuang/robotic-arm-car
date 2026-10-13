@@ -4,7 +4,7 @@ import math
 import time
 
 from config import BALL_POSITION, BASE, VISION
-from vision.targets import ordered_candidates
+from vision.targets import choose_position, ordered_candidates, validate_target
 from . import straight_pid as straight
 from .control import check_cancel, clamp, cleanup
 from .feedback import WheelOdometry
@@ -94,10 +94,10 @@ class EncoderSpeed:
 
 
 def middle_ball(layout):
-    return _middle_candidate(layout, label="小球")
+    return _layout_candidate(layout, label="小球")
 
 
-def _middle_candidate(layout, *, label):
+def _layout_candidate(layout, *, label, target_value=None):
     size = layout.get("size")
     if (not isinstance(size, (list, tuple)) or len(size) != 2
             or any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in size)):
@@ -107,10 +107,15 @@ def _middle_candidate(layout, *, label):
     if any(not math.isfinite(row["center_x"]) or not 0 <= row["center_x"] < width for row in candidates):
         raise ValueError(f"{label}横坐标超出画面，已停车")
     try:
-        ordered = ordered_candidates(candidates)
+        if target_value is None:
+            ordered = ordered_candidates(candidates)
+            candidate = ordered[1]
+        else:
+            index, ordered = choose_position(candidates, target_value, require_all=False)
+            candidate = ordered[index]
     except ValueError:
         return None, width
-    return ordered[1], width
+    return candidate, width
 
 
 def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=print):
@@ -118,17 +123,21 @@ def calibrate_ball_position(board, vision, *, config=None, stop_event=None, log=
                                       kind="ball", label="小球", validator=validate_config)
 
 
-def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, label, validator):
+def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, label, validator,
+                               target_value=None):
     """连续控制，不调用定距离 straight()；所有退出路径都发送零速度。"""
     try:
         check_cancel(stop_event)
         cfg = validator(config)
+        if target_value is not None:
+            validate_target(kind, target_value)
         board.stop()
         started = time.monotonic()
         deadline = started + cfg["timeout"]
         # 加载与首次观察期间保持静止；后续只读取后台缓存，不阻塞控制环。
+        observation_args = {} if target_value is None else {"target_shape": target_value}
         first = getattr(vision, f"observe_{kind}_layout")(
-            timeout=min(cfg["timeout"], VISION["observe_timeout"]))
+            timeout=min(cfg["timeout"], VISION["observe_timeout"]), **observation_args)
         check_cancel(stop_event)
         wheels = WheelOdometry.read_origin(board, stop_event)
         position = PositionPID(cfg)
@@ -158,7 +167,8 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
         target_position = position_error = 0.0
         center_x = center_line = 0.0
         last_visual_state = None
-        log(f"开始{label}位置 PID 校准：视觉换算 {cfg['mm_per_px']:g}mm/px，"
+        target_label = f"指定{label}（{target_value}）" if target_value is not None else f"中间{label}"
+        log(f"开始{label}位置 PID 校准：{target_label}对齐画面中心，视觉换算 {cfg['mm_per_px']:g}mm/px，"
             f"最大速度 {cfg['speed']:g}mm/s，中心容差 ±{cfg['tolerance_px']:g}px，"
             f"位置容差 ±{cfg['position_tolerance_mm']:g}mm；"
             f"连续缺失 {cfg['missing_frames']} 帧暂停，恢复确认 {cfg['recovery_frames']} 帧，"
@@ -203,12 +213,12 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
                         and -0.1 <= age < min(cfg["lost_timeout"], VISION["frame_stale"])):
                     last_index, last_stamp = index, stamp
                     new_layout = True
-                    middle, width = _middle_candidate(layout, label=label)
-                    frame_complete = middle is not None
+                    candidate, width = _layout_candidate(layout, label=label, target_value=target_value)
+                    frame_complete = candidate is not None
                     if frame_complete:
-                        if identity is not None and middle["value"] != identity:
-                            raise RuntimeError(f"中间{label}身份发生变化，已停止位置校准")
-                        identity = middle["value"]
+                        if identity is not None and candidate["value"] != identity:
+                            raise RuntimeError(f"{target_label}身份发生变化，已停止位置校准")
+                        identity = candidate["value"]
                         missing_frames = 0
                         if recovering:
                             recovered_frames += 1
@@ -218,7 +228,7 @@ def _calibrate_layout_position(board, vision, *, config, stop_event, log, kind, 
                         else:
                             usable = True
                             recovered_frames = 0
-                        center_x, center_line = middle["center_x"], width / 2
+                        center_x, center_line = candidate["center_x"], width / 2
                         error = center_x - center_line
                         last_valid_stamp = stamp
                         in_band = usable and abs(error) <= cfg["tolerance_px"]

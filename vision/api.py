@@ -137,9 +137,10 @@ class Vision:
         """读取调用后新帧的三个球坐标及同一原图尺寸，供位置校准使用。"""
         return self._observe("ball", None, timeout=timeout, stable_frames=1, include_size=True)
 
-    def observe_object_layout(self, *, timeout=None):
-        """读取新帧的三个物品坐标及同一原图尺寸，不预先指定形状。"""
-        return self._observe("object", None, timeout=timeout, stable_frames=1, include_size=True)
+    def observe_object_layout(self, *, timeout=None, target_shape=None):
+        """读取物品新帧；指定形状时只需该目标唯一可见，否则等待三个物品。"""
+        return self._observe("object", target_shape, timeout=timeout, stable_frames=1, include_size=True,
+                             require_all=target_shape is None)
 
     def ball_layout_sample(self):
         """非阻塞读取最新物体推理；保留缺球帧，供位置控制累计连续漏检。"""
@@ -198,7 +199,7 @@ class Vision:
                     return None
                 self.condition.wait(min(remaining, 0.05))
 
-    def _observe(self, kind, value, *, timeout=None, stable_frames=None, include_size=False):
+    def _observe(self, kind, value, *, timeout=None, stable_frames=None, include_size=False, require_all=True):
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("观察超时必须为有限正数")
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -228,6 +229,7 @@ class Vision:
                            timeout=remaining,
                            stable_frames=self.config["observe_stable_frames"] if stable_frames is None else stable_frames,
                            stop_event=self.stop_event,
+                           require_all=require_all,
                            candidate_source=lambda **kwargs: self._wait_candidates(
                                kind, include_size=include_size, **kwargs))
 
