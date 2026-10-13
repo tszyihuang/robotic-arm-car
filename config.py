@@ -9,7 +9,7 @@ BASE = {
     "baudrate": 115200,
     "write_timeout": 1.0,  # 底盘串口单次写入最长等待秒数；原为固定 0.2 s。
     "speed": 300.0,  # 普通直走／视觉直走共用速度，mm/s；倒车校准独立配置。
-    "go_ahead_stop_y": 300.0,  # go-ahead 省略停车行时使用的原图 y 坐标（px）。
+    "go_ahead_stop_y": 323.0,  # go-ahead 省略停车行时使用的原图 y 坐标（px）。
     "go_ahead_speed": 300.0,  # go-ahead 省略速度时的默认速度（mm/s），可独立调节。
     "turn_speed": 250.0,
     "turn_spin_speed": 150.0,

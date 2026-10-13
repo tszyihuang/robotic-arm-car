@@ -10,19 +10,22 @@ arm-move 6 0 160 1
 scan-qrcode    # 三位任务码：排爆物颜色、反恐靶颜色、救援目标形状
 home
 turn 87 0.35
-turn -44 0.61
+turn -44 0.62
 turn -42 0
 straight 0.7 150   #过减速带
 sleep 0.5
 calibrate-position  # 过减速带后校准，撞击后底盘四轮失能（零 PWM）
 sleep 0.5
-turn 45 0.25
+turn 45 0.24
 turn 45 0
 go-ahead  
-turn -87 0.35
+turn -87 0.36
 go-ahead
 turn -87 0.36
-vision-straight 0.37
+straight -0.3
+
+vision-straight 0.67
+
 arm-move -90 55 74 89
 detect-balls
 calibrate-ball-position   #小球任务点校准
@@ -46,7 +49,7 @@ calibrate-object-position   #人质任务点校准
 人质任务                  # 识别第三位指定形状的位置，调用对应抓物体段
 
 
-vision-straight 1.67
+vision-straight 1.69
 arm-move 0 0 160 -130
 
 
