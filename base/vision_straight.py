@@ -20,7 +20,7 @@ class VisionCfg:
 
     lookahead: float | str = VISION_CONTROL["LOOKAHEAD"]  # 比例，或 "vanishing"（两侧边界延长线交点）
     lane_width_mm: float = VISION_CONTROL["LANE_WIDTH_MM"]
-    lateral_offset_mm: float = 0.0  # + = 车向左偏；由 vision-straight 接口启用，align 默认不补偿。
+    lateral_offset_mm: float = 0.0  # + = 车向左偏；视觉前进接口启用，align 默认不补偿。
     fov_deg: float = VISION_CONTROL["FOV_DEG"]
     focal_px: float | None = None
     width: int = VISION_CONTROL["FRAME_W"]
@@ -500,8 +500,8 @@ def prepare_heading(heading, imu=None):
 
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
-                    log=print, log_path=None, stop_event=None):
-    """视觉巡线，丢失后 gap 保持航向、恢复后接回视觉；可选末段固定 gap。"""
+                    log=print, log_path=None, stop_event=None, stop_condition=None):
+    """视觉巡线；按距离或 stop_condition(now) 停车，丢失后 gap 保持航向。"""
     rl = None
     stopped = False
     try:
@@ -556,6 +556,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             t_prev = now
             if now > deadline:
                 reason = "总时长超时，已强制停车"
+                break
+            if stop_condition is not None and stop_condition(now):
                 break
             if totals is None:
                 if now - t_data > 0.5:

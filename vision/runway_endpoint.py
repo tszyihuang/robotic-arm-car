@@ -11,7 +11,7 @@ import time
 if __name__ == "__main__" and not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from base.control import MotionCancelled, cleanup
+from base.control import MotionCancelled, check_cancel, cleanup
 from config import RUNWAY_ENDPOINT, VISION
 
 
@@ -147,6 +147,42 @@ class EndpointDetector:
             self._seen_stamp = capture_stamp
             return self._result("tracking", candidate, valid=True)
         return self._result("confirming" if self.point is None else "jump-pending", candidate, required)
+
+
+class EndpointStop:
+    """非阻塞读取共用摄像头的新原图；确认端点达到指定行后结束前进。"""
+
+    def __init__(self, camera, *, stop_y=292, config=None, stop_event=None, log=print):
+        if not math.isfinite(stop_y) or stop_y < 0:
+            raise ValueError("跑道尽头停车行必须为有限非负数")
+        self.camera = camera
+        self.stop_y = stop_y
+        self.stop_event = stop_event
+        self.log = log
+        self.detector = EndpointDetector(config)
+        self.result = None
+        self._index = 0
+        self._stamp = 0.0
+        self._started = time.time()
+
+    def __call__(self, now):
+        check_cancel(self.stop_event)
+        try:
+            frame, index, stamp = self.camera.next_frame(
+                after=self._index, after_stamp=self._stamp, timeout=0.0,
+                stop_event=self.stop_event)
+        except TimeoutError:
+            if now - (self._stamp or self._started) >= VISION["frame_stale"]:
+                raise RuntimeError("跑道尽头检测没有新鲜画面，已停车")
+            return False
+        if self.stop_y >= frame.shape[0]:
+            raise ValueError(f"跑道尽头停车行 {self.stop_y:g} 超出画面高度 {frame.shape[0]}")
+        self._index, self._stamp = index, stamp
+        self.result = self.detector.process(frame, frame_index=index, capture_stamp=stamp, now=now)
+        if self.result["valid"] and self.result["point"][1] >= self.stop_y:
+            self.log(f"  跑道尽头 y={self.result['point'][1]}px，达到停车行 {self.stop_y:g}px，停车")
+            return True
+        return False
 
 
 class MjpegSource:

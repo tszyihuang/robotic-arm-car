@@ -20,7 +20,7 @@ def run(base, arm, vision, *, tasks_path=None, stop_event=None, section="主线"
         mission = MissionState()
         check_cancel(stop_event)
         if section == "主线" or any(step.command in (
-                "scan-qrcode", "detect-balls", "detect-targets", "align", "vision-straight",
+                "scan-qrcode", "detect-balls", "detect-targets", "align", "vision-straight", "go-ahead",
                 "calibrate-ball-position", "calibrate-object-position", *TASK_SECTIONS)
                 for plan in (steps, *branches.values()) for step in plan):
             vision.start()

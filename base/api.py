@@ -159,6 +159,33 @@ class Base:
         return self._require_success({"ok": not info["reason"],
                                       "distance_m": measured / 1000, "vision": info})
 
+    def go_ahead(self, vision, speed=None):
+        """沿跑道视觉前进，确认的尽头边界达到画面 y=292 时停车。"""
+        from vision.runway_endpoint import EndpointStop
+
+        speed = self.config["speed"] if speed is None else speed
+        if not 0 < speed <= 1000:
+            raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
+        heading = self._heading(vision)
+        heading.cfg.speed = speed
+        heading.cfg.lane_width_mm = VISION_CONTROL["LANE_WIDTH_MM"]
+        heading.cfg.lateral_offset_mm = VISION_CONTROL["LATERAL_OFFSET_MM"]
+        if heading.wait_track(stop_event=self.stop_event) is None:
+            raise RuntimeError("出发前未拿到可用跑道中心线")
+        endpoint = EndpointStop(vision.start_camera(), stop_event=self.stop_event)
+        log_path = None
+        if VISION_CONTROL["LOG_DIR"] is not None:
+            log_dir = Path(VISION_CONTROL["LOG_DIR"])
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"go-ahead_{datetime.now():%Y%m%d_%H%M%S_%f}.csv"
+            print(f"  跑道尽头日志：{log_path}")
+        measured, info = vision_straight.vision_straight(
+            self.motor, heading, log_path=log_path, stop_event=self.stop_event,
+            stop_condition=endpoint)
+        info["endpoint"] = endpoint.result
+        return self._require_success({"ok": not info["reason"],
+                                      "distance_m": measured / 1000, "vision": info})
+
     def stop(self):
         if self.motor is not None:
             self.motor.stop()

@@ -230,3 +230,6 @@ sleep 0.5
 turn 45 0.25
 turn 45 0
 vision-straight 0.46
+
+[跑道尽头]
+go-ahead  # 视觉巡线前进，跑道尽头边界达到画面 y=292 时停车

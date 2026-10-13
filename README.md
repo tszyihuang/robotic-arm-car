@@ -26,7 +26,7 @@ python3 main.py --help
 
 机械臂任务段落开头应安排 `arm-calibrate`，将启动时四轴当前位置设为软件基准，并使舵机 ID1 保持固定位置；请在启动前将机械臂摆到对应 `0 0 160 24` 的初始姿态。主线在扫码姿态前建立基准；自动调用动作段时，若机械臂已经校准，段内的 `arm-calibrate` 沿用当前基准，避免在观察姿态重新置零。单独执行该段仍正常校准。纯机械臂任务不启动摄像头和 YOLO。
 
-可用指令：`pause`、`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离 [速度]`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
+可用指令：`pause`、`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离 [速度]`、`go-ahead [速度]`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
 
 `pause` 无参数，在 `tasks.txt` 需要暂停的位置单独写一行。暂停时同时检测控制台回车和夹爪舵机 ID2：按下回车，或舵机在最近 0.5 秒内向任意方向移动至少 5°，都会继续下一条指令。检测从本次暂停开始，每约 0.05 秒采样一次，忽略过期样本，并处理 0°/360° 跨界；慢速移动超过半秒才累计到 5°、小幅来回抖动都不会触发。查询起止时间用于保守判断半秒窗口，延迟回包不会被当作新发生的转动。复用机械臂 TTL 连接，只读角度，不改变舵机扭矩；需要手动拨动时可先安排 `arm-disable`。查询写入超时或应答异常时提示，并每隔至少 0.2 秒重试；恢复通信后重新建立角度基准，不跨通信缺失累计转动。设备断开等其他错误提示并保留回车通道。等待期间可按 `Ctrl+C` 取消；标准输入关闭时停止任务。干跑只打印指令、不等待或读取舵机；`pause` 自身不叠加默认步骤间隔。例如：
 
@@ -140,11 +140,13 @@ sudo udevadm settle
 
 `vision-straight 距离 [速度]` 的距离单位为米，可选速度单位为 mm/s，范围为 `(0, 1000]`。例如 `vision-straight 1 600` 以 600 mm/s 为巡航目标前进 1 米；省略速度时使用 `BASE['speed']`，指定速度只影响当前指令。起步仍按加速度限制提速，临近终点按剩余距离减速停车，视觉纠偏时左右轮速会有所不同。干跑打印当前指令采用的速度。
 
+`go-ahead [速度]` 不指定距离，沿用视觉直走的巡线、横向补偿、航向与轮速控制，持续前进直到跑道尽头。通过 `vision/runway_endpoint.py` 的 `EndpointDetector` 检测共用摄像头的新原始画面；仅在本帧确认有效的端点纵坐标达到或越过 `y=292` 时下发零轮速，等待车轮停稳后结束指令。端点还未出现时继续前进，重复帧、过期帧及尚未确认的跳变不触发完成；摄像头断开或持续没有新鲜画面会停车并终止任务。可选速度的单位、范围和默认值与 `vision-straight` 相同，不按距离切换末段 gap。日志保存到 `VISION_CONTROL['LOG_DIR']`，文件名以 `go-ahead_` 开头。`tasks.txt` 已提供 `[跑道尽头]` 段，可用 `python3 main.py --跑道尽头 --dry-run` 预览，`python3 main.py --跑道尽头` 实机执行。
+
 有有效边界时使用视觉巡线，包括短距离和临近终点的运动。左右边界平均得到跑道中心线，在 `VISION_CONTROL['LOOKAHEAD']` 指定的画面高度比例处（当前 `0.7`，夹在有效边界范围内）取前视点；既修正车头方向，也修正车身横向偏移。出发时已有的偏移同样参与纠偏。内环默认用编码器 gap 估算角速度。
 
 行驶中视觉过期（`VISION_CONTROL['LOST_STOP']=0.6` s）或拿不到可用中心线时，切换 gap 盲走：以切换时的左右轮累计里程差为基准，使用编码器航向环保持当时车头方向，继续按剩余距离减速并在目标位置停车。进入盲走时清除旧视觉滤波和航向环积分，不继续使用过期图像转向。后台视觉仍被监测，连续 `GAP_RECOVERY_FRAMES=2` 个有效新帧后恢复视觉纠偏；重复、过期、乱序和缺边界的新帧不能凑足连续确认。可以多次丢失并恢复，每次丢失都会重新锁定当前 gap。CSV 的 `src=gap-blind` 表示临时盲走，此时画面几何列留空。盲走只能保持航向，不能矫正横向位置或执行摄像头横向偏移补偿；视觉恢复后继续纠偏。编码器断流、总时长超时、过大航向误差和取消仍会停车。出发前仍等待可用跑道中心线；`align` 的视觉丢失处理沿用原规则。
 
-`VISION_CONTROL['LANE_WIDTH_MM']=300.0` 表示左右边界实际间距 30cm；`LATERAL_OFFSET_MM` 表示相对原来画面居中路线的车身横移补偿，当前 `10.0` 是向左 1cm，设为 `50.0` 是向左 5cm。正值向左、负值向右，设为 `0` 恢复画面居中。每帧在同一前视行测量边界像素间距，按 `像素补偿 = 像素路宽 × LATERAL_OFFSET_MM / LANE_WIDTH_MM` 换算；车往左时中线在画面里往右，所以参考横坐标为画幅中心加像素补偿。控制持续跟踪这条偏移后的路线。单侧边界短暂缺失时沿用最近两侧都在时测得的宽度；没有可用宽度则切换 gap 盲走。这项补偿只用于 `vision-straight`，`align` 仍使用原参考。补偿需要数值 `LOOKAHEAD`；`LOOKAHEAD='vanishing'` 只修正航向，须将 `LATERAL_OFFSET_MM` 设为 `0`。
+`VISION_CONTROL['LANE_WIDTH_MM']=300.0` 表示左右边界实际间距 30cm；`LATERAL_OFFSET_MM` 表示相对原来画面居中路线的车身横移补偿，当前 `10.0` 是向左 1cm，设为 `50.0` 是向左 5cm。正值向左、负值向右，设为 `0` 恢复画面居中。每帧在同一前视行测量边界像素间距，按 `像素补偿 = 像素路宽 × LATERAL_OFFSET_MM / LANE_WIDTH_MM` 换算；车往左时中线在画面里往右，所以参考横坐标为画幅中心加像素补偿。控制持续跟踪这条偏移后的路线。单侧边界短暂缺失时沿用最近两侧都在时测得的宽度；没有可用宽度则切换 gap 盲走。这项补偿用于 `vision-straight` 和 `go-ahead`，`align` 仍使用原参考。补偿需要数值 `LOOKAHEAD`；`LOOKAHEAD='vanishing'` 只修正航向，须将 `LATERAL_OFFSET_MM` 设为 `0`。
 
 `VISION_CONTROL['GAP_FINISH_MM']` 默认 `0`，表示关闭末段纯航向保持。设为正值时，在剩余距离小于等于该值（mm）后，以切换时的左右轮里程差作为基准，用 gap 保持当时车头方向；这段不再进行视觉横向纠偏或检查边界。总距离不超过该值时全程使用 gap，无需视觉就绪。位置环、轮速环和编码器断流停车继续生效。
 

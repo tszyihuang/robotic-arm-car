@@ -32,6 +32,7 @@ COMMANDS = {
     "calibrate-object-position": ("base", "calibrate_object_position", (0,)),
     "align": ("base", "align", (0,)),
     "vision-straight": ("base", "vision_straight", (1, 2)),
+    "go-ahead": ("base", "go_ahead", (0, 1)),
     "arm-calibrate": ("arm", "calibrate", (0,)),
     "arm-disable": ("arm", "disable", (0,)),
     "arm-move": ("arm", "move_joints", (4,)),
@@ -99,6 +100,8 @@ def load_section(path, section):
                 raise ValueError("sleep 延时必须为非负秒数")
             if command == "vision-straight" and len(args) == 2 and not 0 < args[1] <= 1000:
                 raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
+            if command == "go-ahead" and args and not 0 < args[0] <= 1000:
+                raise ValueError("视觉直走速度必须为 (0, 1000] mm/s")
             if command in LOCK_TARGET_COMMANDS and args and args[0] < 0:
                 raise ValueError("锁靶超时必须为非负数，0 表示不限时")
         except ValueError as exc:
@@ -154,6 +157,8 @@ def execute(step, base, arm, vision, *, stop_event=None, target_color=None):
         args += (vision,)
     elif step.command == "vision-straight":
         args = (args[0], vision, *args[1:])
+    elif step.command == "go-ahead":
+        args = (vision, *args)
     if step.command == "detect-balls":
         result = detect_ball.run(device)
     elif step.command == "detect-targets":
