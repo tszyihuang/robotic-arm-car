@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from . import straight_pid
 from config import BASE, STRAIGHT, VISION_CONTROL
+from vision.boundary import valid_geometry
 from .control import CsvLog, clamp, cleanup, check_cancel, format_number, wait_cancelable
 from .feedback import WheelOdometry
 
@@ -51,6 +52,7 @@ class VisionCfg:
     margin: float = STRAIGHT["MARGIN_MM"]
     kp_pos: float = STRAIGHT["KP_POS"]
     gap_finish_mm: float = VISION_CONTROL["GAP_FINISH_MM"]
+    gap_finish_y_ratio: float = VISION_CONTROL["GAP_FINISH_Y_RATIO"]
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.lane_width_mm) or self.lane_width_mm <= 0:
@@ -61,6 +63,8 @@ class VisionCfg:
             raise ValueError("横向偏移补偿需要数值 LOOKAHEAD；vanishing 只能修正航向")
         if type(self.gap_recovery_frames) is not int or self.gap_recovery_frames <= 0:
             raise ValueError("GAP_RECOVERY_FRAMES 必须为正整数")
+        if not math.isfinite(self.gap_finish_y_ratio) or not 0 <= self.gap_finish_y_ratio <= 1:
+            raise ValueError("GAP_FINISH_Y_RATIO 必须为 0 到 1 之间的有限数")
 
     def size(self, info: dict | None) -> tuple[int, int]:
         """原帧尺寸：优先用 info 里模型报的 [宽,高]，没有就退回 720p 兜底值。"""
@@ -118,6 +122,22 @@ def _side_rec(rec: dict | None, cfg: VisionCfg, height: float):
     angle = rec.get("angle_deg")
     angle = math.degrees(math.atan(-a)) if angle is None else float(angle)
     return a, b, min(y_far, y_near), max(y_far, y_near), angle
+
+
+def boundaries_below_finish(cfg: VisionCfg, info: dict | None) -> bool:
+    """两侧实际检出的完整线段都位于 y ≥ 阈值行；缺失端点不能用外推范围代替。"""
+    if cfg.gap_finish_y_ratio <= 0 or not valid_geometry(info):
+        return False
+    _, height = cfg.size(info)
+    threshold = cfg.gap_finish_y_ratio * height
+    for name in ("left", "right"):
+        rec = info.get(name)
+        if rec is None or rec.get("near_y") is None or rec.get("far_y") is None:
+            return False
+        side = _side_rec(rec, cfg, height)
+        if side is None or not (threshold <= side[2] < side[3] <= height):
+            return False
+    return True
 
 
 def track_view(cfg: VisionCfg, info: dict, half_px: float | None = None,
@@ -345,6 +365,7 @@ class VisionHeading:
         self._seq = 0
         self._seen_seq = 0
         self.new_sample = False    # 包括无边界的摄像头新帧，用于恢复时的连续帧计数。
+        self.boundary_finish = False  # 本拍的新鲜完整边界是否已越过关闭视觉纠偏的行。
 
     # ---- 出发前检查跑道几何 ----
     def age(self, now=None) -> float:
@@ -402,6 +423,7 @@ class VisionHeading:
         self._yaw_frame = None
         # 减一：让第一拍就把当前这帧用上（车在静止等出发，这帧就是最新的）
         self._seq = self._seen_seq = self.cam.sample().seq - 1
+        self.boundary_finish = False
 
     # ---- 内部：误差的"现在值" ----
     def _yaw_at(self, t: float) -> float | None:
@@ -433,9 +455,13 @@ class VisionHeading:
         s = self.cam.sample()
         self.new_sample = s.seq != self._seen_seq
         self._seen_seq = s.seq
+        self.boundary_finish = False
         new = False
         if s.info is not None and s.seq != self._seq and self.age(now) <= self.cfg.lost_stop:
             self._seq = s.seq
+            self.boundary_finish = (s.state == "ready" and not s.error
+                                    and min(s.t_valid, now - s.frame_dt) > self.t_frame
+                                    and boundaries_below_finish(self.cfg, s.info))
             v = track_view(self.cfg, s.info, self.half_px, self.ref)
             if v is None and (self.cfg.lookahead == "vanishing" or self.cfg.lateral_offset_mm):
                 # 新帧可能没有有效灭点/路宽；清掉旧结果，由控制侧选择 gap 或停车。
@@ -501,7 +527,7 @@ def prepare_heading(heading, imu=None):
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
                     log=print, log_path=None, stop_event=None, stop_condition=None):
-    """视觉巡线；按距离或 stop_condition(now) 停车，丢失后 gap 保持航向。"""
+    """视觉巡线；边界越过阈值行或视觉丢失后用 gap 保持航向，按距离或端点停车。"""
     rl = None
     stopped = False
     try:
@@ -522,6 +548,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         finish_gap_src = gap_src or WheelGapSource(cfg.track_mm, cfg.gap_window, cfg.gap_tau)
         # 短距离从起点保持航向；长距离在跨入末段时锁定新的 gap 基准。
         gap_ref = 0.0 if gap_only else None
+        finish_gap_trigger = "distance" if gap_only else None
         blind_gap_ref = None       # 临时盲走基准，与永久的末段 gap 基准分开。
         recovery_frames = blind_switches = vision_recoveries = 0
         recovery_frame_time = 0.0
@@ -577,17 +604,25 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
             if (cfg.gap_finish_mm > 0 and gap_ref is None and goal_mm is not None
                     and goal_mm - dist <= cfg.gap_finish_mm):
                 gap_ref = gap
+                finish_gap_trigger = "distance"
                 blind_gap_ref = None
                 loop.reset()  # 视觉积分不能带入新的编码器航向基准。
                 log(f"  剩余 {goal_mm - dist:.0f}mm，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
 
-            # ---- 视觉失效切到临时 gap；连续新帧恢复后接回视觉 ----
+            # ---- 完整边界越过阈值行后永久 gap；视觉失效时临时 gap ----
             if gap_ref is None:
                 hd = heading.step(now)
                 visual_age = hd.age if hd is not None else heading.age(now)
                 lost_max = max(lost_max, visual_age)
                 usable = hd is not None and hd.absolute and visual_age <= cfg.lost_stop
-                if not usable:
+                if heading.boundary_finish:
+                    gap_ref = gap
+                    finish_gap_trigger = "boundary-y"
+                    blind_gap_ref = None
+                    loop.reset()
+                    log(f"  两侧完整跑道边界均位于 y≥{cfg.gap_finish_y_ratio:g}×画面高度，"
+                        f"关闭视觉纠偏，切换 gap 航向保持，基准 gap={gap_ref:+.1f}mm")
+                elif not usable:
                     recovery_frames = 0
                     if blind_gap_ref is None:
                         blind_gap_ref = gap
@@ -749,6 +784,7 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 "heading_mode": ("gap" if gap_ref is not None else
                                  "gap-blind" if blind_gap_ref is not None else "vision"),
                 "finish_gap_ref_mm": gap_ref, "blind_gap_ref_mm": blind_gap_ref,
+                "finish_gap_trigger": finish_gap_trigger,
                 "blind_switches": blind_switches, "vision_recoveries": vision_recoveries}
         return dist, info
 
