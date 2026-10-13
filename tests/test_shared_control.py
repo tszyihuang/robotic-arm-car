@@ -163,8 +163,9 @@ class ArmControlTests(unittest.TestCase):
                 arm.move_joints(target, order=order, gripper="open")
                 self.assertEqual(sent, expected)
                 self.assertEqual(arm.get_joints(), target)
-                servo.move_angle.assert_called_once_with(291.0, wait=True, stop_event=None,
-                                                         allow_contact=False)
+                servo.move_angle.assert_called_once_with(arm.config.gripper_open_angle_deg,
+                                                        wait=True, stop_event=None,
+                                                        allow_contact=False)
 
     def test_explicit_nonblocking_joint_commands_do_not_wait_for_encoders(self):
         targets = ({1: 90, 2: 82, 3: 142, 4: -56}, {1: -90, 2: 0, 3: 160, 4: 4})

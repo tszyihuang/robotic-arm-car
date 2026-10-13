@@ -63,7 +63,7 @@ class TaskParserTests(unittest.TestCase):
     def test_invalid_command_arity_and_nonfinite_numbers_report_line(self):
         for command in ("未知 1", "straight", "align 1", "turn 44 0.24 150",
                         "sleep", "sleep 1 2", "sleep -0.5", "sleep nan", "sleep inf", "sleep 错误",
-                        "pause 1",
+                        "pause 1", "light 353",
                         "vision-straight", "vision-straight 1 600 700",
                         "vision-straight 1 0", "vision-straight 1 -1", "vision-straight 1 1001",
                         "vision-straight 1 nan", "vision-straight 1 inf", "vision-straight 1 错误",

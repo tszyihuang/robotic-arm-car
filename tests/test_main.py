@@ -15,6 +15,7 @@ from tasks import ball, target, delivery
 from arm.api import Arm
 from arm.servo import TORQUE_ENABLE
 from base.control import MotionCancelled
+from config import ARM, SERVO
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,6 +57,48 @@ class MissionTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 main.run(*devices, tasks_path=path, section=section)
 
+    def test_light_moves_only_id2_and_waits_before_the_next_step(self):
+        for angle in (353.0, 330.0):
+            with self.subTest(angle=angle), patch.dict(ARM, light_angle_deg=angle):
+                arm = Arm(simulate=True)
+                self.addCleanup(arm.close)
+                arm.dry_run = True
+                servo = arm._ensure_servo()
+                tool_before = servo.status(servo_id=1)
+                base, vision = Mock(dry_run=True), Mock()
+
+                def after_light(distance):
+                    state = servo.status(servo_id=2)
+                    self.assertAlmostEqual(state['angle_deg'], angle, delta=.1)
+                    self.assertTrue(state['torque_enabled'])
+                    self.assertEqual(servo.status(servo_id=1), tool_before)
+
+                base.straight.side_effect = after_light
+                self.run_tasks('[光]\nlight # 点灯\nstraight 0.1\n',
+                               base, arm, vision, section='光')
+                base.straight.assert_called_once_with(.1)
+                vision.start.assert_not_called()
+                self.assertIsNone(arm._bus)
+                self.assertFalse(arm.calibrated)
+
+    def test_light_cli_dry_run_prints_id2_and_configured_angle(self):
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'main.py'),
+                                 '--光', '--dry-run'], cwd='/tmp',
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('[光 1/1] light', result.stdout)
+        self.assertIn(f"ID2，{ARM['light_angle_deg']:g}°", result.stdout)
+        self.assertNotIn('[主线 ', result.stdout)
+
+    def test_light_cannot_move_another_gripper_id(self):
+        with patch.dict(ARM, gripper_servo_id=1):
+            arm = Arm(simulate=True)
+        self.addCleanup(arm.close)
+        with self.assertRaisesRegex(ValueError, 'light 使用舵机 ID2'):
+            arm.light()
+        self.assertIsNone(arm._servo)
+        self.assertIsNone(arm._bus)
+
     def test_selected_ball_section_uses_file_in_order_without_starting_vision(self):
         text = "[主线]\n未知指令\n[抓中间的小球]\narm-calibrate\n" \
                "gripper-open\narm-move -94 132 133 -82\ngripper-close\narm-home\n" \
@@ -91,7 +134,8 @@ class MissionTests(unittest.TestCase):
                           else arm.config.gripper_close_angle_deg)
         self.assertAlmostEqual(int.from_bytes(servo._ser.memories[2][56:58], 'little') * 360 / 4095,
                                expected_angle, delta=0.1)
-        self.assertEqual(int.from_bytes(servo._ser.memories[1][56:58], 'little'), 340)
+        self.assertEqual(int.from_bytes(servo._ser.memories[1][56:58], 'little'),
+                         SERVO['fixed_positions'][1])
         vision.start.assert_not_called()
         vision.close.assert_called_once()
         self.assertNotIn('[主线 ', output.getvalue())

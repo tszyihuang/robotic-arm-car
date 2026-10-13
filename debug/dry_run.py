@@ -79,6 +79,9 @@ class DryArm:
     def close_gripper(self):
         print(f"arm.close_gripper()  # ID{ARM['gripper_servo_id']}，{ARM['gripper_close_angle_deg']:g}°，实机等待闭合到位或运动后停稳")
 
+    def light(self):
+        print(f"arm.light()  # ID2，{ARM['light_angle_deg']:g}°，实机等待到位并停稳")
+
     def cancel(self):
         pass
 

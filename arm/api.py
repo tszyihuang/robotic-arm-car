@@ -213,6 +213,12 @@ class Arm:
         return self.move_gripper(self.config.gripper_close_angle_deg,
                                  stop_event=stop_event, allow_contact=True)
 
+    def light(self, *, stop_event=None):
+        """舵机 ID2 移到点灯角度并等待到位；无需校准四轴。"""
+        if self.config.gripper_servo_id != 2:
+            raise ValueError("light 使用舵机 ID2，请将 ARM['gripper_servo_id'] 设置为 2")
+        return self.move_gripper(self.config.light_angle_deg, stop_event=stop_event)
+
     def close(self):
         arm, servo, bus = self._arm, self._servo, self._bus
         self._arm = self._servo = None

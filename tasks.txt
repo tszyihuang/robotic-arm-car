@@ -18,9 +18,9 @@ calibrate-position  # 过减速带后校准，撞击后底盘四轮失能（零 
 sleep 0.5
 turn 45 0.25
 turn 45 0
-vision-straight 0.46  #视觉校准1
+go-ahead  
 turn -87 0.36
-vision-straight 0.33
+go-ahead
 turn -87 0.36
 vision-straight 0.37
 arm-move -90 55 74 89
@@ -37,7 +37,7 @@ detect-targets        #识别标靶
 打靶任务             # 第二位颜色匹配 detect-targets 的排列，调用对应打靶段
 home
 
-straight 0.28
+go-ahead
 turn -87 0.37
 vision-straight 0.6
 
@@ -88,17 +88,20 @@ arm-home
 
 [打左边的靶]
 lock-target-left          # 左靶横纵误差均 ≤ 8px 连续 2 秒后完成
-gripper-open
+light
+sleep 0.5
 gripper-close
 
 [打中间的靶]
 lock-target-middle        # 中靶横纵误差均 ≤ 8px 连续 2 秒后完成
-gripper-open
+light
+sleep 0.5
 gripper-close
 
 [打右边的靶]
 lock-target-right         # 右靶横纵误差均 ≤ 8px 连续 2 秒后完成
-gripper-open
+light
+sleep 0.5
 gripper-close
 
 [抓左边的物体]
@@ -233,3 +236,8 @@ vision-straight 0.46
 
 [跑道尽头]
 go-ahead  # 视觉巡线前进，跑道尽头边界达到画面 y=292 时停车
+
+[光]
+light  # 舵机 ID2 移到 353° 并等待到位
+sleep 2
+gripper-close

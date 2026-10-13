@@ -10,7 +10,7 @@ from arm.config import ArmConfig
 from arm.errors import MotionTimeout
 from arm.servo import FeetechSTSServo
 from base.control import MotionCancelled, check_cancel
-from config import SERVO
+from config import ARM, SERVO
 from tasks.runner import Step, execute
 
 
@@ -264,6 +264,23 @@ class BlockingGripperTests(unittest.TestCase):
 
     def state(self, position, *, moving=False, speed=0):
         return dict(position=position, moving=moving, speed_raw=speed, torque_enabled=True)
+
+    def test_light_waits_for_target_instead_of_accepting_contact(self):
+        arm = Arm(simulate=True)
+        arm.dry_run = True
+        arm._servo = self.servo
+        self.addCleanup(arm.close)
+        target = round(ARM['light_angle_deg'] * 4095 / 360)
+
+        def status():
+            elapsed = self.clock.now - 100
+            return self.state(3000 if elapsed < .5 else target)
+
+        with patch.object(self.servo, 'status', side_effect=status):
+            execute(Step(1, 'light', ()), None, arm, None)
+        self.assertGreaterEqual(self.clock.now + 1e-9, 100.7)
+        self.assertEqual(self.servo._target, target)
+        self.assertIsNone(arm._bus)
 
     def test_open_waits_through_initial_idle_until_arrival_and_settling(self):
         def status():

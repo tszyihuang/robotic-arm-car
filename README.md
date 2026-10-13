@@ -26,7 +26,9 @@ python3 main.py --help
 
 机械臂任务段落开头应安排 `arm-calibrate`，将启动时四轴当前位置设为软件基准，并使舵机 ID1 保持固定位置；请在启动前将机械臂摆到对应 `0 0 160 24` 的初始姿态。主线在扫码姿态前建立基准；自动调用动作段时，若机械臂已经校准，段内的 `arm-calibrate` 沿用当前基准，避免在观察姿态重新置零。单独执行该段仍正常校准。纯机械臂任务不启动摄像头和 YOLO。
 
-可用指令：`pause`、`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离 [速度]`、`go-ahead [速度]`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
+可用指令：`pause`、`sleep 秒数`、`straight 距离 [速度]`、`turn 角度 [半径]`、`calibrate-position`、`calibrate-ball-position`、`calibrate-object-position`、`align`、`vision-straight 距离 [速度]`、`go-ahead [速度]`、`arm-calibrate`、`arm-disable`、`arm-move q1 q2 q3 q4`、`home` / `arm-home`、`gripper-open`、`gripper-close`、`light`、`scan-qrcode`、`detect-balls`、`detect-targets`、`小球任务`、`打靶任务`、`人质任务`、`lock-target-left [超时]`、`lock-target-middle [超时]`、`lock-target-right [超时]`。
+
+`light` 无参数，让舵机 ID2 移到 353°，等待到位并停稳后继续下一条指令。目标角度由 `config.py` 的 `ARM['light_angle_deg']` 配置，范围 0..360°；复用夹爪 TTL 连接，要求 `ARM['gripper_servo_id']=2`，无需先执行 `arm-calibrate`。任务表的 `[光]` 段可用 `python3 main.py --光` 单独执行，或加 `--dry-run` 预览。
 
 `pause` 无参数，在 `tasks.txt` 需要暂停的位置单独写一行。暂停时同时检测控制台回车和夹爪舵机 ID2：按下回车，或舵机在最近 0.5 秒内向任意方向移动至少 5°，都会继续下一条指令。检测从本次暂停开始，每约 0.05 秒采样一次，忽略过期样本，并处理 0°/360° 跨界；慢速移动超过半秒才累计到 5°、小幅来回抖动都不会触发。查询起止时间用于保守判断半秒窗口，延迟回包不会被当作新发生的转动。复用机械臂 TTL 连接，只读角度，不改变舵机扭矩；需要手动拨动时可先安排 `arm-disable`。查询写入超时或应答异常时提示，并每隔至少 0.2 秒重试；恢复通信后重新建立角度基准，不跨通信缺失累计转动。设备断开等其他错误提示并保留回车通道。等待期间可按 `Ctrl+C` 取消；标准输入关闭时停止任务。干跑只打印指令、不等待或读取舵机；`pause` 自身不叠加默认步骤间隔。例如：
 

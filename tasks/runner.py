@@ -40,6 +40,7 @@ COMMANDS = {
     "home": ("arm", "home", (0,)),
     "gripper-open": ("arm", "open_gripper", (0,)),
     "gripper-close": ("arm", "close_gripper", (0,)),
+    "light": ("arm", "light", (0,)),
     "scan-qrcode": ("vision", "scan_qrcode", (0,)),
     "detect-balls": ("vision", "observe_balls", (0,)),
     "detect-targets": ("vision", "observe_targets", (0,)),
