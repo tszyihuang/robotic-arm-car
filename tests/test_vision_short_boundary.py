@@ -25,14 +25,14 @@ def boundary_info(left_length=200, right_length=200, *, near_y=700, height=720):
 
 class ShortBoundaryGeometryTests(unittest.TestCase):
     def test_either_short_side_rejects_the_frame_and_exactly_60_is_usable(self):
-        cfg = vs.VisionCfg()
+        cfg = vs.VisionCfg(min_boundary_length_px=60)
         for left, right, expected in ((59, 200, True), (200, 59, True), (59, 59, True),
                                       (60, 200, False), (200, 60, False), (60, 60, False)):
             with self.subTest(left=left, right=right):
                 self.assertEqual(vs.has_short_boundary(cfg, boundary_info(left, right)), expected)
 
     def test_length_is_euclidean_in_original_pixels_and_independent_of_y_and_resolution(self):
-        cfg = vs.VisionCfg()
+        cfg = vs.VisionCfg(min_boundary_length_px=60)
         for height in (400, 720, 1080):
             for near_y in (80, height - 1):
                 with self.subTest(height=height, near_y=near_y):
@@ -62,7 +62,7 @@ class ShortBoundaryGeometryTests(unittest.TestCase):
 
     def test_short_frame_clears_cached_visual_error_until_a_new_usable_frame(self):
         cam = camera(boundary_info())
-        heading = vs.VisionHeading(vs.VisionCfg(), cam)
+        heading = vs.VisionHeading(vs.VisionCfg(min_boundary_length_px=60), cam)
         self.assertIsNotNone(heading.step(now=10.0, reject_short=True))
         cam.update(boundary_info(59), frames=2, state="ready", now=10.1)
         self.assertIsNone(heading.step(now=10.1, reject_short=True))
@@ -94,8 +94,10 @@ class ShortBoundaryMotionTests(unittest.TestCase):
         cam = camera(boundary_info())
         raw_camera = shared_camera()
         cam.start_camera.return_value = raw_camera
-        heading = vs.VisionHeading(vs.VisionCfg(kp_rate=0, rate_src=rate_src), cam)
+        heading = vs.VisionHeading(vs.VisionCfg(kp_rate=0, rate_src=rate_src,
+                                              min_boundary_length_px=60), cam)
         base = Base()
+        base.config["go_ahead_stop_y"] = 292
         board = base.motor = Mock()
         imu = Mock(yaw=0.0, yaw_rate=0.0)
         imu.age.return_value = 0
@@ -108,6 +110,8 @@ class ShortBoundaryMotionTests(unittest.TestCase):
             packets.extend([(None, None)] * 30)
         else:
             packets.append(([1020, 1020, 980, 980], None))
+            if command == "go-ahead":
+                packets.extend([([1020, 1020, 980, 980], None)] * 30)
         pending = iter(enumerate(packets))
 
         def feedback(*args):
@@ -170,7 +174,7 @@ class ShortBoundaryMotionTests(unittest.TestCase):
                     self.assertEqual(result["vision"]["short_frames"], 2)
                     self.assertEqual(result["vision"]["heading_mode"], "vision")
                     self.assertIsNone(result["vision"]["finish_gap_ref_mm"])
-                    self.assertEqual([row["src"] for row in rows],
+                    self.assertEqual([row["src"] for row in rows[:6]],
                                      ["both", "gap-short", "gap-short", "both", "gap-short", "both"])
                     self.assertEqual(result["vision"]["vision_recoveries"], 2)
                     for row in rows:
@@ -186,6 +190,8 @@ class ShortBoundaryMotionTests(unittest.TestCase):
                     else:
                         self.assertTrue(result["vision"]["endpoint"]["valid"])
                         self.assertEqual(result["vision"]["endpoint"]["point"][1], 292)
+                        self.assertEqual(float(rows[-1]["endpoint_target_mms"]), 0)
+                        self.assertEqual(float(rows[-1]["endpoint_error_px"]), 0)
 
     def test_old_y_condition_no_longer_disables_visual_control(self):
         _, _, _, rows, _ = self.run_command("vision-straight", [{"info": boundary_info()}])

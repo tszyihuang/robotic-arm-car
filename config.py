@@ -9,7 +9,7 @@ BASE = {
     "baudrate": 115200,
     "write_timeout": 1.0,  # 底盘串口单次写入最长等待秒数；原为固定 0.2 s。
     "speed": 300.0,  # 普通直走／视觉直走共用速度，mm/s；倒车校准独立配置。
-    "go_ahead_stop_y": 275.0,  # go-ahead 省略停车行时使用的原图 y 坐标（px）。
+    "go_ahead_stop_y": 300.0,  # go-ahead 省略停车行时使用的原图 y 坐标（px）。
     "go_ahead_speed": 300.0,  # go-ahead 省略速度时的默认速度（mm/s），可独立调节。
     "turn_speed": 250.0,
     "turn_spin_speed": 150.0,
@@ -20,6 +20,15 @@ BASE = {
     "feedback_stale": 0.3,
     "feedback_timeout": 0.08,
     "align_rate_src": "auto",
+}
+
+GO_AHEAD_POSITION = {
+    # 位置误差 = 停车行 - 确认的尽头 y（px）；PID 输出前进速度（mm/s）。
+    "kp": 3.0, "ki": 0.0, "kd": 0.3,
+    "derivative_tau": 0.15,  # 微分低通时间常数（s），仅在有效新帧到来时更新 PID。
+    "min_speed": 35.0,  # 尚未到位时的最低目标速度，避免低速不动（mm/s）。
+    "tolerance_px": 2.0,  # 距停车行不超过此值，或已越过停车行时，目标速度降为零。
+    "decel": 300.0,  # 参考速度最大减速度（mm/s²）；加速仍使用 STRAIGHT['ACCEL']。
 }
 
 STRAIGHT = {

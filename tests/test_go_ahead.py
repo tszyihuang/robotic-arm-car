@@ -12,6 +12,7 @@ import numpy as np
 import main
 from base.api import Base
 from base.control import MotionCancelled
+from base.go_ahead import EndpointApproach
 from base import vision_straight as vs
 from config import BASE, VISION, VISION_CONTROL
 from debug.dry_run import DryArm, DryBase, DryVision
@@ -134,6 +135,69 @@ class EndpointStopTests(unittest.TestCase):
             self.endpoint(self.clock[0])
 
 
+class EndpointApproachTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = [100.0]
+        clock_patch = patch("vision.runway_endpoint.time.time", side_effect=lambda: self.clock[0])
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.camera = shared_camera()
+        endpoint = EndpointStop(self.camera, stop_y=300, config=DETECTOR_CONFIG, log=lambda _: None)
+        self.approach = EndpointApproach(endpoint, 200, config={"tolerance_px": 0}, log=lambda _: None)
+
+    def sample(self, y):
+        self.clock[0] += 0.05
+        publish(self.camera, y, self.clock[0])
+        self.approach.update(self.clock[0])
+        return self.approach.target_speed
+
+    def test_pid_slows_before_the_stop_row_and_never_requests_reverse(self):
+        self.sample(200)
+        self.assertEqual(self.sample(200), 200)
+        speeds = [self.sample(y) for y in (230, 260, 280, 295, 300)]
+        self.assertTrue(all(a >= b for a, b in zip(speeds, speeds[1:])))
+        self.assertGreater(speeds[0], speeds[-2])
+        self.assertEqual(speeds[-1], 0)
+        self.assertTrue(self.approach.reached)
+        # 进入收尾后，坐标轻微回退不会再次加速。
+        self.assertEqual(self.sample(299), 0)
+
+    def test_duplicate_and_pending_frames_do_not_update_pid(self):
+        self.approach.config["ki"] = 0.2
+        self.sample(250)
+        self.sample(250)
+        self.sample(260)
+        state = (self.approach.target_speed, self.approach.integral, self.approach.derivative)
+        self.clock[0] += 0.05
+        self.approach.update(self.clock[0])
+        self.assertEqual((self.approach.target_speed, self.approach.integral,
+                          self.approach.derivative), state)
+        self.sample(350)  # 未确认的大跳变不能完成停车或改变 PID 输出。
+        self.assertFalse(self.approach.reached)
+        self.assertEqual((self.approach.target_speed, self.approach.integral,
+                          self.approach.derivative), state)
+
+    def test_integral_does_not_accumulate_at_cruise_limit(self):
+        self.approach.config["ki"] = 10
+        for _ in range(20):
+            self.sample(100)
+        self.assertEqual(self.approach.integral, 0)
+        self.assertEqual(self.approach.target_speed, 200)
+
+    def test_fresh_images_without_the_confirmed_endpoint_eventually_fail(self):
+        self.sample(250)
+        self.sample(250)
+        with self.assertRaisesRegex(RuntimeError, "位置持续丢失"):
+            for _ in range(15):
+                self.sample(None)
+
+    def test_pid_parameters_are_validated(self):
+        for config in ({"kp": 0}, {"ki": -1}, {"kd": float("nan")}, {"decel": 0},
+                       {"derivative_tau": -1}, {"tolerance_px": float("inf")}, {"min_speed": -1}):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                EndpointApproach(self.approach.endpoint, 200, config=config)
+
+
 class GoAheadMotionTests(unittest.TestCase):
     def run_motion(self, frames, *, encoder_missing=False, stable_frames=2, stop_y=292):
         clock = [100.0]
@@ -141,13 +205,18 @@ class GoAheadMotionTests(unittest.TestCase):
         board = Mock()
         distance, tick, stopped = [0], [0], [False]
         images = iter(frames)
+        last_y = [None]
 
         def feedback(*args):
             clock[0] += 0.02
             if tick[0] == 0 or stopped[0]:
                 tick[0] += 1
                 return [distance[0]] * 4, None
-            y = next(images)
+            y = next(images, last_y[0])
+            last_y[0] = y
+            if tick[0] > 150:
+                raise AssertionError("前进控制未完成")
+            tick[0] += 1
             if y == "error":
                 camera.error = "摄像头断开"
             else:
@@ -165,9 +234,10 @@ class GoAheadMotionTests(unittest.TestCase):
         with patch.dict(BASE, meters_per_count=0.001), \
                 patch("base.vision_straight.time.time", side_effect=lambda: clock[0]):
             endpoint = EndpointStop(camera, stop_y=stop_y, config=config, log=lambda _: None)
+            approach = EndpointApproach(endpoint, 100, config={"tolerance_px": 0}, log=lambda _: None)
             heading = lane_heading(clock[0])
             try:
-                result = vs.vision_straight(board, heading, stop_condition=endpoint, log=lambda _: None)
+                result = vs.vision_straight(board, heading, speed_control=approach, log=lambda _: None)
             except RuntimeError:
                 self.assertEqual(board.spd.call_args.args, (0, 0, 0, 0))
                 self.assertTrue(any(command.args != (0, 0, 0, 0)
@@ -175,25 +245,31 @@ class GoAheadMotionTests(unittest.TestCase):
                 raise
         return board, endpoint, result
 
-    def test_control_keeps_visual_steering_until_confirmed_endpoint_then_stops(self):
+    def test_control_keeps_visual_steering_and_ramps_down_after_confirmed_endpoint(self):
         board, endpoint, (distance, info) = self.run_motion([None, 270, 270, 291, 292])
         self.assertFalse(info["reason"])
-        self.assertEqual(distance, 50)
+        self.assertGreater(distance, 50)
         self.assertEqual(info["heading_mode"], "vision")
         self.assertIsNone(info["finish_gap_ref_mm"])
         self.assertEqual(endpoint.result["point"][1], 292)
         commands = board.spd.call_args_list
-        self.assertEqual(len(commands), 5)
+        self.assertGreater(len(commands), 5)
         for command in commands[:-1]:
             self.assertNotEqual(command.args[0], command.args[2])
+            self.assertTrue(all(value >= 0 for value in command.args))
+        # 第五张画面已到停车行，仍发送低速指令，随后逐步降到零。
+        self.assertNotEqual(commands[4].args, (0, 0, 0, 0))
+        means = [(command.args[0] + command.args[2]) / 2 for command in commands[4:-1]]
+        self.assertGreater(means[0], means[-1])
+        self.assertTrue(all(a >= b for a, b in zip(means, means[1:])))
         self.assertEqual(commands[-1].args, (0, 0, 0, 0))
 
     def test_selected_stop_row_keeps_moving_past_292_and_stops_at_300(self):
         board, endpoint, (distance, info) = self.run_motion([270, 270, 292, 299, 300], stop_y=300)
         self.assertFalse(info["reason"])
-        self.assertEqual(distance, 50)
+        self.assertGreater(distance, 50)
         self.assertEqual(endpoint.result["point"][1], 300)
-        self.assertEqual(len(board.spd.call_args_list), 5)
+        self.assertGreater(len(board.spd.call_args_list), 5)
         self.assertTrue(all(command.args != (0, 0, 0, 0)
                             for command in board.spd.call_args_list[:-1]))
         self.assertEqual(board.spd.call_args_list[-1], call(0, 0, 0, 0))
@@ -213,6 +289,43 @@ class GoAheadMotionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "摄像头断开"):
             self.run_motion([270, 270, "error"])
 
+    def test_camera_failure_during_final_deceleration_still_stops_immediately(self):
+        with self.assertRaisesRegex(RuntimeError, "摄像头断开"):
+            self.run_motion([270, 270, 291, 292, "error"])
+
+    def test_position_and_wheel_speed_loops_stop_a_simulated_car_near_the_selected_row(self):
+        clock, distance, actual, command = [100.0], [0.0], [0.0], [0.0]
+        camera, board = shared_camera(), Mock()
+        history = []
+
+        def feedback(*args):
+            clock[0] += 0.02
+            actual[0] += 0.02 / 0.10 * (command[0] - actual[0])
+            distance[0] += actual[0] * 0.02
+            y = round(200 + distance[0] * 0.6)
+            publish(camera, y, clock[0])
+            history.append((y, command[0]))
+            if len(history) > 1500:
+                raise AssertionError("仿真车辆未完成停车")
+            return [distance[0] / 0.1] * 4, [actual[0] * 0.01 / 0.1] * 4
+
+        def speed(*values):
+            command[0] = sum(values) / 4
+
+        board.feedback.side_effect, board.spd.side_effect = feedback, speed
+        with patch.dict(BASE, meters_per_count=0.0001), \
+                patch.object(vs.time, "time", side_effect=lambda: clock[0]):
+            endpoint = EndpointStop(camera, stop_y=275, config=DETECTOR_CONFIG, log=lambda _: None)
+            approach = EndpointApproach(endpoint, 200, log=lambda _: None)
+            heading = lane_heading(clock[0])
+            heading.cfg.kp_yaw = heading.cfg.ki_yaw = 0
+            measured, info = vs.vision_straight(board, heading, speed_control=approach, log=lambda _: None)
+        self.assertFalse(info["reason"])
+        self.assertAlmostEqual(200 + measured * 0.6, 275, delta=5)
+        self.assertLess(actual[0], 10)
+        self.assertEqual(board.spd.call_args_list[-1], call(0, 0, 0, 0))
+        self.assertTrue(any(y < 270 and 35 <= speed < 100 for y, speed in history[-100:]))
+
 
 class GoAheadApiTests(unittest.TestCase):
     def test_api_uses_shared_camera_and_applies_selected_row_and_speed(self):
@@ -224,14 +337,15 @@ class GoAheadApiTests(unittest.TestCase):
         heading.wait_track = Mock(return_value=object())
         settings = []
 
-        def control(board, current_heading, *, stop_condition, **kwargs):
+        def control(board, current_heading, *, speed_control, **kwargs):
             self.assertIs(board, base.motor)
             self.assertIsNone(kwargs.get("goal_mm"))
-            self.assertIs(stop_condition.camera, vision.start_camera.return_value)
-            self.assertIs(stop_condition.stop_event, base.stop_event)
+            endpoint = speed_control.endpoint
+            self.assertIs(endpoint.camera, vision.start_camera.return_value)
+            self.assertIs(endpoint.stop_event, base.stop_event)
             self.assertEqual(current_heading.cfg.lateral_offset_mm, VISION_CONTROL["LATERAL_OFFSET_MM"])
             self.assertEqual(current_heading.cfg.lane_width_mm, VISION_CONTROL["LANE_WIDTH_MM"])
-            settings.append((stop_condition.stop_y, current_heading.cfg.speed))
+            settings.append((endpoint.stop_y, current_heading.cfg.speed, speed_control.speed))
             return 850, {"reason": ""}
 
         with patch.dict(VISION_CONTROL, LOG_DIR=None), \
@@ -241,7 +355,7 @@ class GoAheadApiTests(unittest.TestCase):
             self.assertTrue(base.go_ahead(vision, 300)["ok"])
             result = base.go_ahead(vision)
         self.assertEqual(result["distance_m"], 0.85)
-        self.assertEqual(settings, [(300, 600), (300, 200), (310, 200)])
+        self.assertEqual(settings, [(300, 600, 600), (300, 200, 200), (310, 200, 200)])
         self.assertEqual(base.config["go_ahead_stop_y"], 310)
         self.assertEqual(base.config["go_ahead_speed"], 200)
         self.assertEqual(base.config["speed"], BASE["speed"])
@@ -297,8 +411,8 @@ class GoAheadTaskTests(unittest.TestCase):
         self.assertIn("base.go_ahead(vision, stop_y=310px, speed=200 mm/s)", output)
         self.assertIn("base.go_ahead(vision, stop_y=300px, speed=200 mm/s)", output)
         self.assertIn("base.go_ahead(vision, stop_y=300px, speed=600 mm/s)", output)
-        self.assertIn("y ≥ 310px", output)
-        self.assertIn("y ≥ 300px", output)
+        self.assertIn("PID 接近 y=310px", output)
+        self.assertIn("PID 接近 y=300px", output)
 
     def test_invalid_task_parameters_report_line_before_moving(self):
         for command in ("go-ahead 300 200 1", "go-ahead -1", f"go-ahead {VISION['height']}",
@@ -312,4 +426,4 @@ class GoAheadTaskTests(unittest.TestCase):
 
     def test_task_file_provides_independent_go_ahead_section(self):
         steps = load_section(ROOT / "tasks.txt", "跑道尽头")
-        self.assertEqual([(step.command, step.args) for step in steps], [("go-ahead", (300,))])
+        self.assertEqual([step.args for step in steps if step.command == "go-ahead"], [(275,)])

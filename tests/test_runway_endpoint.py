@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from config import VISION
-from vision.runway_endpoint import EndpointDetector, MjpegSource, endpoint_config, first_endpoint, main
+from vision.runway_endpoint import EndpointCandidate, EndpointDetector, MjpegSource, endpoint_config, first_endpoint, main
 from vision.runway_endpoint_web import EndpointWeb
 
 urlopen = build_opener(ProxyHandler({})).open
@@ -27,7 +27,52 @@ def scene(y=80, *, width=100, height=160):
     return frame
 
 
+def reference_endpoint(frame, overrides=None):
+    """独立按窗口直接取均值，验证批量运算仍返回最靠下的合格端点。"""
+    config = endpoint_config(overrides)
+    height, width = frame.shape[:2]
+    window = config["window"]
+    column = cv2.cvtColor(frame[:, width // 2:width // 2 + 1], cv2.COLOR_BGR2LAB)[:, 0].astype(np.float32)
+    for y in range(height - window, window - 1, -1):
+        upper = column[y - window:y].mean(axis=0)
+        lower = column[y:y + window].mean(axis=0)
+        yellow_delta = float(upper[2] - lower[2])
+        color_delta = float(np.linalg.norm(upper[1:] - lower[1:]))
+        if yellow_delta < config["yellow_threshold"] or color_delta < config["color_threshold"]:
+            continue
+        support = sum(float(value - lower[2]) >= config["yellow_threshold"]
+                      for value in column[y - window:y, 2]) / window
+        if support >= config["yellow_support"]:
+            return EndpointCandidate(width // 2, y, color_delta, yellow_delta)
+    return None
+
+
 class FirstEndpointTests(unittest.TestCase):
+    def test_batched_windows_match_direct_means_for_noise_edges_and_minimum_height(self):
+        rng = np.random.default_rng(731)
+        for window in (1, 3, 8, 17):
+            for height in (2 * window - 1, 2 * window, 2 * window + 1, 160, 720):
+                noise = rng.integers(0, 256, (height, 3, 3), dtype=np.uint8)
+                for frame in (noise, scene(height // 2, width=3, height=height),
+                              scene(None, width=3, height=height)):
+                    with self.subTest(window=window, height=height, pixel=frame[0, 0]):
+                        original = frame.copy()
+                        config = {"window": window, "yellow_support": 0.3,
+                                  "yellow_threshold": 1.7, "color_threshold": 3.3}
+                        self.assertEqual(first_endpoint(frame, config), reference_endpoint(frame, config))
+                        np.testing.assert_array_equal(frame, original)
+
+    def test_thresholds_keep_double_precision_at_qualifying_pixel_boundary(self):
+        frame = scene()
+        initial = reference_endpoint(frame)
+        for key, value in (("yellow_threshold", initial.yellow_delta),
+                           ("color_threshold", initial.color_delta)):
+            for threshold in (value, np.nextafter(value, float("inf")),
+                              np.nextafter(value, float("-inf"))):
+                config = {key: float(threshold)}
+                with self.subTest(config=config):
+                    self.assertEqual(first_endpoint(frame, config), reference_endpoint(frame, config))
+
     def test_low_contrast_gray_to_yellow_matches_observed_camera_colors(self):
         candidate = first_endpoint(scene())
         self.assertEqual(candidate.x, 50)
@@ -69,7 +114,10 @@ class FirstEndpointTests(unittest.TestCase):
 
 class EndpointTrackingTests(unittest.TestCase):
     def setUp(self):
-        self.detector = EndpointDetector({"smoothing": 1.0})
+        # 跟踪用例明确使用各自的确认条件，不依赖现场 config.py 的调参值。
+        self.tracking_config = {"smoothing": 1.0, "stable_frames": 3, "jump_frames": 5,
+                                "stable_tolerance_px": 6.0, "max_jump_px": 40.0}
+        self.detector = EndpointDetector(self.tracking_config)
         self.index = 0
 
     def sample(self, y=80, *, detector=None, **frame_options):
@@ -155,7 +203,7 @@ class EndpointTrackingTests(unittest.TestCase):
         result = self.detector.process(scene(), frame_index=4, capture_stamp=11, now=11)
         self.assertIsNone(result["point"])
         self.assertEqual(result["pending_count"], 1)
-        self.detector = EndpointDetector()
+        self.detector = EndpointDetector(self.tracking_config)
         self.index = 0
         self.acquire()
         result = self.sample(width=120)

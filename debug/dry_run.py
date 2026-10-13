@@ -40,7 +40,7 @@ class DryBase:
         stop_y = BASE['go_ahead_stop_y'] if stop_y is None else stop_y
         speed = BASE['go_ahead_speed'] if speed is None else speed
         print(f"base.go_ahead(vision, stop_y={stop_y:g}px, speed={speed:g} mm/s)  # 视觉巡线，"
-              f"复用 runway_endpoint 端点检测，确认边界 y ≥ {stop_y:g}px 后停车")
+              f"尽头位置 PID 接近 y={stop_y:g}px 时逐渐减速，参考速度降到零后停车")
 
     def stop(self):
         pass

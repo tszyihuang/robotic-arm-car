@@ -45,7 +45,7 @@ class EndpointCandidate:
 
 
 def first_endpoint(frame, config=None):
-    """每帧只返回从下往上遇到的第一个合格突变；命中即返回，不再搜索。"""
+    """批量比较中心列窗口，只返回从下往上遇到的第一个合格突变。"""
     import cv2
     import numpy as np
 
@@ -58,23 +58,35 @@ def first_endpoint(frame, config=None):
     if height < 2 * window:
         return None
     x = width // 2
-    # 只转换中心一列。前缀和只用于窗口降噪，不搜索其他列或后续端点。
+    # 只转换中心一列；批量求窗口均值，避免逐行 Python 循环拖慢后台 YOLO。
     column = cv2.cvtColor(frame[:, x:x + 1], cv2.COLOR_BGR2LAB)[:, 0].astype(np.float32)
     sums = np.vstack((np.zeros((1, 3), dtype=np.float32), column.cumsum(axis=0)))
-    for y in range(height - window, window - 1, -1):
-        upper = (sums[y] - sums[y - window]) / window
-        lower = (sums[y + window] - sums[y]) / window
-        yellow_delta = float(upper[2] - lower[2])
-        if yellow_delta < config["yellow_threshold"]:
-            continue
-        color_delta = float(np.linalg.norm(upper[1:] - lower[1:]))
-        if color_delta < config["color_threshold"]:
-            continue
-        support = np.count_nonzero(column[y - window:y, 2] - lower[2]
-                                   >= config["yellow_threshold"]) / window
-        if support >= config["yellow_support"]:
-            return EndpointCandidate(x, y, color_delta, yellow_delta)
-    return None
+    rows = np.arange(window, height - window + 1)
+    upper = (sums[window:height - window + 1] - sums[:height - 2 * window + 1]) / window
+    lower = (sums[2 * window:] - sums[window:height - window + 1]) / window
+    yellow_delta = upper[:, 2] - lower[:, 2]
+    candidates = np.flatnonzero(yellow_delta.astype(np.float64) >= config["yellow_threshold"])
+    if not len(candidates):
+        return None
+    chroma = upper[candidates, 1:] - lower[candidates, 1:]
+    # 批量点积沿用单窗口 norm 的舍入方式，阈值比较保留 Python float 精度。
+    color_delta = np.sqrt((chroma[:, None, :] @ chroma[:, :, None])[:, 0, 0])
+    qualified = color_delta.astype(np.float64) >= config["color_threshold"]
+    candidates, color_delta = candidates[qualified], color_delta[qualified]
+    if not len(candidates):
+        return None
+    windows = np.lib.stride_tricks.sliding_window_view(column[:, 2], window)
+    support = np.count_nonzero(
+        windows[rows[candidates] - window] - lower[candidates, 2, None]
+        >= config["yellow_threshold"], axis=1) / window
+    matches = np.flatnonzero(support >= config["yellow_support"])
+    if not len(matches):
+        return None
+    # 行号递增排列：最后一个匹配就是原算法从画面底部首先遇到的端点。
+    match = matches[-1]
+    candidate = candidates[match]
+    return EndpointCandidate(x, int(rows[candidate]), float(color_delta[match]),
+                             float(yellow_delta[candidate]))
 
 
 class EndpointDetector:
@@ -165,6 +177,10 @@ class EndpointStop:
         self._stamp = 0.0
         self._started = time.time()
 
+    @property
+    def capture_stamp(self):
+        return self._stamp
+
     def __call__(self, now):
         check_cancel(self.stop_event)
         try:
@@ -180,7 +196,6 @@ class EndpointStop:
         self._index, self._stamp = index, stamp
         self.result = self.detector.process(frame, frame_index=index, capture_stamp=stamp, now=now)
         if self.result["valid"] and self.result["point"][1] >= self.stop_y:
-            self.log(f"  跑道尽头 y={self.result['point'][1]}px，达到停车行 {self.stop_y:g}px，停车")
             return True
         return False
 

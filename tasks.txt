@@ -236,7 +236,7 @@ vision-straight 0.46
 
 [跑道尽头]
 arm-calibrate
-go-ahead 275  # 视觉巡线前进，跑道尽头边界达到画面 y=300 时停车；可追加速度（mm/s）
+go-ahead 300  # 视觉巡线前进，位置 PID 接近画面 y=275 时逐渐减速停车；可追加速度（mm/s）
 turn -87 0.36
 arm-disable
 

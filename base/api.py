@@ -160,7 +160,8 @@ class Base:
                                       "distance_m": measured / 1000, "vision": info})
 
     def go_ahead(self, vision, stop_y=None, speed=None):
-        """沿跑道视觉前进，确认的尽头边界达到指定画面 y 坐标时停车。"""
+        """沿跑道视觉前进，按尽头边界的画面位置 PID 减速停车。"""
+        from .go_ahead import EndpointApproach
         from vision.runway_endpoint import EndpointStop
 
         stop_y = self.config["go_ahead_stop_y"] if stop_y is None else stop_y
@@ -176,6 +177,7 @@ class Base:
         if heading.wait_track(stop_event=self.stop_event) is None:
             raise RuntimeError("出发前未拿到可用跑道中心线")
         endpoint = EndpointStop(vision.start_camera(), stop_y=stop_y, stop_event=self.stop_event)
+        approach = EndpointApproach(endpoint, speed)
         log_path = None
         if VISION_CONTROL["LOG_DIR"] is not None:
             log_dir = Path(VISION_CONTROL["LOG_DIR"])
@@ -184,8 +186,10 @@ class Base:
             print(f"  跑道尽头日志：{log_path}")
         measured, info = vision_straight.vision_straight(
             self.motor, heading, log_path=log_path, stop_event=self.stop_event,
-            stop_condition=endpoint)
+            speed_control=approach)
         info["endpoint"] = endpoint.result
+        info["endpoint_control"] = {"error_px": approach.error_px,
+                                    "target_speed": approach.target_speed}
         return self._require_success({"ok": not info["reason"],
                                       "distance_m": measured / 1000, "vision": info})
 

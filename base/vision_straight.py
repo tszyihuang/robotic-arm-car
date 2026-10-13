@@ -531,7 +531,7 @@ def prepare_heading(heading, imu=None):
 
 
 def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | None = None,
-                    log=print, log_path=None, stop_event=None, stop_condition=None):
+                    log=print, log_path=None, stop_event=None, stop_condition=None, speed_control=None):
     """视觉巡线；短边界帧与视觉丢失时用 gap 保持航向，按距离或端点停车。"""
     rl = None
     stopped = False
@@ -575,7 +575,8 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
         t_data = t_prev                     # 最近一次收到编码器数据
         deadline = (t_start + max(10.0, 3.0 * goal_mm / max(cfg.speed, 1.0) + 5.0)
                     if goal_mm else float("inf"))
-        rl = CsvLog(log_path, LOG_COLUMNS)
+        endpoint_columns = ["endpoint_error_px", "endpoint_target_mms"] if speed_control is not None else []
+        rl = CsvLog(log_path, LOG_COLUMNS + endpoint_columns)
         if gap_only:
             log(f"  全程 {goal_mm:g}mm ≤ {cfg.gap_finish_mm:g}mm，使用 gap 保持起步航向")
 
@@ -591,6 +592,10 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                 break
             if stop_condition is not None and stop_condition(now):
                 break
+            if speed_control is not None:
+                speed_control.update(now)
+                if speed_control.reached and pos_cmd == 0.0:
+                    break  # 起步前已到位，保持静止；行驶中要先把参考速度降到零。
             if totals is None:
                 if now - t_data > 0.5:
                     reason = "编码器数据中断 0.5s 以上，已停车"
@@ -697,15 +702,24 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                                 pos_cmd + cfg.accel * dt)
                 v = max(pos_cmd, min(straight_pid.SPEED_MIN, cfg.speed))
             else:
-                pos_cmd = clamp(cfg.speed, max(0.0, pos_cmd - cfg.accel * dt),
+                want = cfg.speed if speed_control is None else speed_control.target_speed
+                decel = cfg.accel if speed_control is None else speed_control.config["decel"]
+                pos_cmd = clamp(want, max(0.0, pos_cmd - decel * dt),
                                 pos_cmd + cfg.accel * dt)
                 v = pos_cmd
+                if speed_control is not None:
+                    if speed_control.reached and v == 0.0:
+                        break
+                    # 收尾时限制差动，避免前进速度已很低却仍原地转向。
+                    trim = clamp(trim, -v, v)
             set_l = clamp(v - trim, -limit, limit)
             set_r = clamp(v + trim, -limit, limit)
 
             # ---- ③ 速度环：按单侧目标速度闭环 ----
             cmd_l = set_l + spd_l.step(set_l - v_l, dt)
             cmd_r = set_r + spd_r.step(set_r - v_r, dt)
+            if speed_control is not None:
+                cmd_l, cmd_r = clamp(cmd_l, 0.0, limit), clamp(cmd_r, 0.0, limit)
             check_cancel(stop_event)
             board.spd(cmd_l * s_sign[0], cmd_l * s_sign[1],
                       cmd_r * s_sign[2], cmd_r * s_sign[3])
@@ -736,7 +750,9 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                        format_number(loop.trim_fb, ".1f"), f"{trim:.1f}",
                        f"{v_l:.1f}", f"{v_r:.1f}", f"{set_l:.0f}", f"{set_r:.0f}",
                        f"{cmd_l:.1f}", f"{cmd_r:.1f}",
-                       f"{gap:.1f}", hd.src)
+                       f"{gap:.1f}", hd.src,
+                       *([format_number(speed_control.error_px, ".1f"),
+                          f"{speed_control.target_speed:.1f}"] if speed_control is not None else []))
 
             if now - t_log > 0.5:                    # 半秒一行，盯直线性和视觉状态
                 t_log = now
@@ -755,7 +771,10 @@ def vision_straight(board, heading: VisionHeading, imu=None, goal_mm: float | No
                     + (f"  相对 gap {gap - active_gap_ref:+.1f}mm" if active_gap_ref is not None else
                        f"  {'灭点' if cfg.lookahead == 'vanishing' else '中线'}偏画面 {hd.lat_px:+5.0f}px"
                        f"  补偿 {heading.view.offset_px:+.0f}px")
-                    + f"  轮速指令/实测 左 {cmd_l:+.0f}/{v_l:+.0f} 右 {cmd_r:+.0f}/{v_r:+.0f}mm/s")
+                    + f"  轮速指令/实测 左 {cmd_l:+.0f}/{v_l:+.0f} 右 {cmd_r:+.0f}/{v_r:+.0f}mm/s"
+                    + (f"  尽头误差 {format_number(speed_control.error_px, '.1f')}px"
+                       f"  PID目标 {speed_control.target_speed:.0f}mm/s"
+                       if speed_control is not None else ""))
         board.spd(0, 0, 0, 0)
         stopped = True
 
