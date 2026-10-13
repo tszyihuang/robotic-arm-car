@@ -253,12 +253,19 @@ class MissionDispatchTests(unittest.TestCase):
         for unselected in ("抓左边的小球", "抓右边的小球", "打中间的靶",
                            "打右边的靶", "抓左边的物体", "抓中间的物体"):
             self.assertNotIn(f"[{unselected} 1/", output)
-        self.assertEqual(calibration.call_count, 3)
-        self.assertIn(call(-98, 119, 105.4, 2.3), moves.call_args_list)
-        self.assertIn(call(-63, 109, 134, -83), moves.call_args_list)
+        calibration.assert_called_once_with(hold_tool=True)
+        recorded_moves = iter(moves.call_args_list)
+        for name in ('抓中间的小球', '抓右边的物体'):
+            for step in main.load_section(main.TASKS_FILE, name):
+                if step.command == 'arm-move':
+                    expected = call(*step.args)
+                    self.assertTrue(any(recorded == expected for recorded in recorded_moves), expected)
         self.assertEqual(lock.call_args.args, (arm, vision, "red"))
         vision.observe_target.assert_called_once_with("object", "cylinder")
-        self.assertIn("[主线 38/38] vision-straight 1.55", output)
+        steps = main.load_main(main.TASKS_FILE)
+        last = steps[-1]
+        args = ' '.join(f'{value:g}' for value in last.args)
+        self.assertIn(f'[主线 {len(steps)}/{len(steps)}] {last.command} {args}'.rstrip(), output)
 
     def test_target_branch_locks_qr_color_when_another_target_is_closer_to_frame_center(self):
         base, arm, vision = self.devices()

@@ -6,10 +6,36 @@ import serial
 
 from arm.config import ArmConfig
 from arm.errors import ProtocolError
-from arm.servo import FeetechSTSServo, GOAL_POSITION
+from arm.servo import FeetechSTSServo, GOAL_POSITION, TORQUE_ENABLE, ServoFault
 
 
 class ServoCommunicationTests(unittest.TestCase):
+    def test_disable_torque_confirms_release_when_ack_still_reports_overload(self):
+        servo = FeetechSTSServo(servo_id=1, simulate=True)
+        self.addCleanup(servo.close)
+        servo.move_angle(164)
+        write = servo._ser.write
+
+        def overload_ack(packet):
+            result = write(packet)
+            if packet[4:7] == bytes((0x03, TORQUE_ENABLE, 0)):
+                body = bytes((1, 2, 0x20))
+                servo._ser.buffer = b'\xff\xff' + body + bytes(((~sum(body)) & 255,))
+            return result
+
+        with patch.object(servo._ser, 'write', side_effect=overload_ack):
+            servo.disable_torque()
+        self.assertFalse(servo.status()['torque_enabled'])
+        self.assertIsNone(servo._target)
+
+    def test_disable_torque_does_not_ignore_fault_if_torque_is_still_enabled(self):
+        servo = FeetechSTSServo(servo_id=1, simulate=True)
+        self.addCleanup(servo.close)
+        with patch.object(servo, '_write_register', side_effect=ServoFault('过载')), \
+                patch.object(servo, 'read_register', return_value=b'\x01'):
+            with self.assertRaisesRegex(ServoFault, '过载'):
+                servo.disable_torque()
+
     def test_serial_write_timeout_is_independent_of_reply_timeout(self):
         with patch('arm.servo.serial.Serial') as open_port:
             servo = FeetechSTSServo('/fake', baudrate=115200, timeout=.1, write_timeout=1.0)

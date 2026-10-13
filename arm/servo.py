@@ -22,7 +22,9 @@ SERVO_SPEED = SERVO['speed']  # 舵机原生速度值，不是关节电机的 rp
 SERVO_TIMEOUT = SERVO['timeout']
 SERVO_WRITE_TIMEOUT = SERVO['write_timeout']
 SERVO_STEP_PER_DEG = 4095 / 360
-SERVO_FIXED_POSITIONS = SERVO['fixed_positions']
+SERVO_FIXED_ANGLES_DEG = SERVO['fixed_angles_deg']
+SERVO_FIXED_POSITIONS = {address: round(angle * SERVO_STEP_PER_DEG)
+                        for address, angle in SERVO_FIXED_ANGLES_DEG.items()}
 
 MODE = 0x21
 TORQUE_ENABLE = 0x28
@@ -43,6 +45,13 @@ def _integer(value, name, lo, hi):
 
 def _checksum(data):
     return (~sum(data)) & 0xFF
+
+
+def _angle_position(angle_deg):
+    angle = finite(angle_deg, "舵机绝对角度")
+    if not 0 <= angle <= 360:
+        raise ValueError("舵机绝对角度必须在 [0, 360]° 范围内")
+    return round(angle * SERVO_STEP_PER_DEG)
 
 
 def _signed_magnitude(word):
@@ -190,7 +199,12 @@ class FeetechSTSServo:
         """关闭指定舵机的扭矩；省略 ID 时关闭当前舵机。"""
         address = self.servo_id if servo_id is None else _integer(servo_id, "舵机 ID", 0, 253)
         with self._lock:
-            self._write_register(TORQUE_ENABLE, b"\x00", servo_id=address)
+            try:
+                self._write_register(TORQUE_ENABLE, b"\x00", servo_id=address)
+            except ServoFault:
+                # 过载舵机可能已执行失能，但应答仍带故障位；读回确认后才视为成功。
+                if self.read_register(TORQUE_ENABLE, 1, servo_id=address)[0] != 0:
+                    raise
             if address == self.servo_id:
                 self._motion_commanded = False
                 self._target = None
@@ -199,7 +213,14 @@ class FeetechSTSServo:
         value = _integer(value, "扭矩限制", 0, 1000)
         self._write_register(TORQUE_LIMIT, struct.pack("<H", value))
 
-    def _stop_after_error(self):
+    def _stop_after_error(self, *, servo_id=None):
+        address = self.servo_id if servo_id is None else servo_id
+        if address != self.servo_id:
+            try:
+                self.disable_torque(servo_id=address)
+            except Exception as exc:
+                warnings.warn(f"舵机 ID{address} 异常后关闭扭矩失败：{exc}", RuntimeWarning)
+            return
         if self._motion_commanded:
             try:
                 self.disable_torque()
@@ -238,15 +259,13 @@ class FeetechSTSServo:
     def move_angle(self, angle_deg, target_speed=None, *, wait=False,
                    stop_event=None, allow_contact=False):
         """绝对编码器角度 0..360°，不改变零点或安装方向。"""
-        angle = finite(angle_deg, "舵机绝对角度")
-        if not 0 <= angle <= 360:
-            raise ValueError("舵机绝对角度必须在 [0, 360]° 范围内")
-        return self.move_to(round(angle * SERVO_STEP_PER_DEG), target_speed, wait=wait,
+        return self.move_to(_angle_position(angle_deg), target_speed, wait=wait,
                             stop_event=stop_event, allow_contact=allow_contact)
 
     def wait_for_arrival(self, target_position=None, *, tolerance=None, timeout=None,
                          settle_seconds=None, stop_event=None, allow_contact=False,
-                         initial_position=None):
+                         initial_position=None, servo_id=None):
+        address = self.servo_id if servo_id is None else _integer(servo_id, "舵机 ID", 0, 253)
         target = _integer(self._target if target_position is None else target_position,
                           "等待目标", 0, 4095)
         tolerance = _integer(SERVO['arrival_tolerance'] if tolerance is None else tolerance,
@@ -261,10 +280,12 @@ class FeetechSTSServo:
         still_since = anchor = None
         try:
             check_cancel(stop_event)
-            initial = self.read_position() if initial_position is None else initial_position
+            initial = initial_position
+            if initial is None:
+                initial = self.read_position() if servo_id is None else self.read_position(servo_id=address)
             while True:
                 check_cancel(stop_event)
-                state = self.status()
+                state = self.status() if servo_id is None else self.status(servo_id=address)
                 check_cancel(stop_event)
                 now = time.monotonic()
                 position = state['position']
@@ -283,12 +304,12 @@ class FeetechSTSServo:
                     return True
                 remaining = deadline - now
                 if remaining <= 0:
-                    raise MotionTimeout(f'夹爪 ID{self.servo_id} {timeout:g}s 内未完成动作'
+                    raise MotionTimeout(f'舵机 ID{address} {timeout:g}s 内未完成动作'
                                         f'（目标 {target}，实际 {position}，'
                                         f'运动中 {state["moving"]}，速度 {state["speed_raw"]}）')
                 wait_cancelable(min(.02, remaining), stop_event)
         except BaseException:
-            self._stop_after_error()
+            self._stop_after_error(servo_id=servo_id)
             raise
 
     def move_relative_deg(self, delta_deg, target_speed=None, *, wait=False):
@@ -309,27 +330,34 @@ class FeetechSTSServo:
         with self._lock:
             return self.move_to(self.read_position())
 
-    def hold_fixed_position(self, servo_id):
-        """复用当前 TTL 连接，使指定舵机保持配置中的固定位置。"""
+    def hold_fixed_position(self, servo_id, *, wait=False, stop_event=None):
+        """复用 TTL 连接，按配置角度保持指定舵机；可等待到位并在失败时失能。"""
         address = _integer(servo_id, "舵机 ID", 0, 253)
-        target = SERVO_FIXED_POSITIONS.get(address)
-        if target is None:
-            raise ValueError(f"舵机 ID{address} 未配置固定位置")
-        target = _integer(target, "固定位置", 0, 4095)
+        angle = SERVO_FIXED_ANGLES_DEG.get(address)
+        if angle is None:
+            raise ValueError(f"舵机 ID{address} 未配置固定角度")
+        target = _angle_position(angle)
         with self._lock:
+            check_cancel(stop_event)
             if address == self.servo_id:
-                return self.move_to(target)
-            if self.read_register(MODE, 1, servo_id=address)[0] != 0:
+                return self.move_to(target, wait=wait, stop_event=stop_event)
+            try:
+                mode = self.read_register(MODE, 1, servo_id=address)[0]
+                check_cancel(stop_event)
+            except BaseException:
+                self._stop_after_error(servo_id=address)
+                raise
+            if mode != 0:
                 raise ValueError(f"舵机 ID{address} 只支持单圈位置模式（mode=0）")
             try:
                 self._write_register(GOAL_POSITION, struct.pack("<HHH", target, 0, self.speed),
                                      servo_id=address)
                 self._write_register(TORQUE_ENABLE, b"\x01", servo_id=address)
+                if wait:
+                    self.wait_for_arrival(target, servo_id=address, stop_event=stop_event)
+                check_cancel(stop_event)
             except BaseException:
-                try:
-                    self._write_register(TORQUE_ENABLE, b"\x00", servo_id=address)
-                except Exception as exc:
-                    warnings.warn(f"舵机 ID{address} 异常后关闭扭矩失败：{exc}", RuntimeWarning)
+                self._stop_after_error(servo_id=address)
                 raise
         return target
 

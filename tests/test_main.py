@@ -86,7 +86,8 @@ class MissionTests(unittest.TestCase):
                                  '--光', '--dry-run'], cwd='/tmp',
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('[光 1/1] light', result.stdout)
+        count = len(main.load_section(ROOT / 'tasks.txt', '光'))
+        self.assertIn(f'[光 1/{count}] light', result.stdout)
         self.assertIn(f"ID2，{ARM['light_angle_deg']:g}°", result.stdout)
         self.assertNotIn('[主线 ', result.stdout)
 
@@ -135,7 +136,7 @@ class MissionTests(unittest.TestCase):
         self.assertAlmostEqual(int.from_bytes(servo._ser.memories[2][56:58], 'little') * 360 / 4095,
                                expected_angle, delta=0.1)
         self.assertEqual(int.from_bytes(servo._ser.memories[1][56:58], 'little'),
-                         SERVO['fixed_positions'][1])
+                         round(SERVO['fixed_angles_deg'][1] * 4095 / 360))
         vision.start.assert_not_called()
         vision.close.assert_called_once()
         self.assertNotIn('[主线 ', output.getvalue())

@@ -132,8 +132,9 @@ class Arm:
             if hold_tool:
                 servo = self._ensure_servo()
                 check_cancel(event)
-                servo.hold_fixed_position(1)
+                target = servo.hold_fixed_position(1, wait=True, stop_event=event)
                 check_cancel(event)
+                print(f"  舵机 ID1 已到位并保持，目标：{target * 360 / 4095:.2f}°（位置 {target}）")
             self._initial_joints = dict(self._arm.config.joint_offsets_deg)
         except MotionCancelled:
             if self._arm is not None and previous_zero is not None:

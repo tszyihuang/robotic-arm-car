@@ -241,3 +241,6 @@ go-ahead  # 视觉巡线前进，跑道尽头边界达到画面 y=292 时停车
 light  # 舵机 ID2 移到 353° 并等待到位
 sleep 2
 gripper-close
+
+[摄像头]
+arm-calibrate

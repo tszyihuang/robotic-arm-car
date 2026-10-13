@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from arm.api import Arm
 from arm.config import ArmConfig
 from arm.errors import MotionTimeout
-from arm.servo import FeetechSTSServo
+from arm.servo import FeetechSTSServo, GOAL_POSITION, MODE, TORQUE_ENABLE, ServoFault
 from base.control import MotionCancelled, check_cancel
 from config import ARM, SERVO
 from tasks.runner import Step, execute
@@ -20,7 +20,8 @@ class Clock:
 
     def wait(self, seconds, stop_event=None):
         check_cancel(stop_event)
-        self.now = round(self.now + seconds, 9)
+        # 正数等待至少推进一个时钟刻度，避免浮点尾差让超时测试停在截止时间之前。
+        self.now = round(self.now + (max(seconds, 1e-9) if seconds > 0 else 0), 9)
         check_cancel(stop_event)
 
 
@@ -250,6 +251,111 @@ class BlockingArmTests(unittest.TestCase):
         self.assertIsNone(ArmConfig().arrival_speed_rpm)
         self.assertIsNone(ArmConfig(arrival_speed_rpm=None).arrival_speed_rpm)
         self.assertEqual(ArmConfig(arrival_speed_rpm=.5).arrival_speed_rpm, .5)
+
+
+class ToolCalibrationTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch('arm.servo.time.monotonic', side_effect=lambda: self.clock.now))
+        self.stack.enter_context(patch('arm.servo.wait_cancelable', self.clock.wait))
+        self.stack.enter_context(patch.dict(SERVO['fixed_angles_deg'], {1: 164.0}))
+        self.arm = Arm(simulate=True)
+        self.arm.dry_run = True
+        self.addCleanup(self.arm.close)
+        self.arm.close_gripper()
+        self.servo = self.arm._servo
+        self.gripper_before = self.servo.status()
+        self.gripper_target = self.servo._target
+        self.started = self.clock.now
+        self.status = self.servo.status
+
+    def assert_tool_released_and_gripper_preserved(self):
+        self.assertFalse(self.servo.status(servo_id=1)['torque_enabled'])
+        self.assertEqual(self.servo.status(), self.gripper_before)
+        self.assertEqual(self.servo._target, self.gripper_target)
+        self.assertFalse(self.arm.calibrated)
+
+    def test_configured_degrees_match_angle_feedback_and_calibration_waits_for_tool(self):
+        def feedback(*, servo_id=None):
+            state = self.status(servo_id=servo_id)
+            if servo_id == 1 and self.clock.now - self.started < .3:
+                state.update(position=1920, moving=True, speed_raw=100)
+            return state
+
+        with patch.object(self.servo, 'status', side_effect=feedback), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            execute(Step(1, 'arm-calibrate', ()), None, self.arm, None)
+        self.assertGreaterEqual(self.clock.now + 1e-9, self.started + .5)
+        self.assertEqual(int.from_bytes(self.servo.read_register(GOAL_POSITION, 2, servo_id=1), 'little'), 1866)
+        self.assertAlmostEqual(self.arm.read_servo_angle(1), 164, delta=.05)
+        self.assertEqual(self.servo.status(), self.gripper_before)
+        self.assertEqual(self.servo._target, self.gripper_target)
+        self.assertTrue(self.arm.calibrated)
+        self.assertLess(output.getvalue().index('舵机 ID1 已到位'),
+                        output.getvalue().index('机械臂已校准'))
+
+    def test_blocked_tool_times_out_without_reporting_calibration_success(self):
+        def feedback(*, servo_id=None):
+            state = self.status(servo_id=servo_id)
+            if servo_id == 1:
+                state.update(position=1920, moving=False, speed_raw=0)
+            return state
+
+        with patch.dict(SERVO, move_timeout=.4), \
+                patch.object(self.servo, 'status', side_effect=feedback), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(MotionTimeout, 'ID1.*目标 1866，实际 1920'):
+                execute(Step(1, 'arm-calibrate', ()), None, self.arm, None)
+        self.assertNotIn('已校准', output.getvalue())
+        self.assertNotIn('已到位', output.getvalue())
+        self.assert_tool_released_and_gripper_preserved()
+
+    def test_tool_overload_releases_id1_and_preserves_gripper(self):
+        def feedback(*, servo_id=None):
+            if servo_id == 1:
+                raise ServoFault('舵机 ID1 故障 0x20：过载')
+            return self.status(servo_id=servo_id)
+
+        with patch.object(self.servo, 'status', side_effect=feedback):
+            with self.assertRaisesRegex(ServoFault, 'ID1.*过载'):
+                execute(Step(1, 'arm-calibrate', ()), None, self.arm, None)
+        self.assert_tool_released_and_gripper_preserved()
+
+    def test_existing_tool_overload_during_mode_query_also_releases_id1(self):
+        self.servo._write_register(TORQUE_ENABLE, b'\x01', servo_id=1)
+        read = self.servo.read_register
+
+        def overloaded_mode(address, size=2, *, servo_id=None):
+            if address == MODE and servo_id == 1:
+                raise ServoFault('舵机 ID1 故障 0x20：过载')
+            return read(address, size, servo_id=servo_id)
+
+        with patch.object(self.servo, 'read_register', side_effect=overloaded_mode):
+            with self.assertRaisesRegex(ServoFault, 'ID1.*过载'):
+                execute(Step(1, 'arm-calibrate', ()), None, self.arm, None)
+        self.assert_tool_released_and_gripper_preserved()
+
+    def test_cancellation_during_tool_arrival_wait_releases_id1(self):
+        stop = threading.Event()
+
+        def cancel(seconds, stop_event=None):
+            stop.set()
+            self.clock.wait(seconds, stop_event)
+
+        with patch('arm.servo.wait_cancelable', side_effect=cancel):
+            with self.assertRaises(MotionCancelled):
+                self.arm.calibrate(hold_tool=True, stop_event=stop)
+        self.assert_tool_released_and_gripper_preserved()
+
+    def test_invalid_fixed_angles_cannot_enable_tool(self):
+        for angle in (-1, 361, float('nan'), float('inf'), True):
+            with self.subTest(angle=angle), patch.dict(SERVO['fixed_angles_deg'], {1: angle}), \
+                    patch.object(self.servo, '_write_register', wraps=self.servo._write_register) as write:
+                with self.assertRaises(ValueError):
+                    self.servo.hold_fixed_position(1, wait=True)
+                write.assert_not_called()
 
 
 class BlockingGripperTests(unittest.TestCase):

@@ -158,7 +158,7 @@ sudo udevadm settle
 
 二维码必须为三位 `1..3`：第一位选排爆物颜色，第二位选反恐靶颜色（1 红、2 绿、3 蓝），第三位选救援目标形状（1 圆柱形、2 圆锥形、3 腰鼓形）。目标识别要求三个候选完整、目标唯一、连续稳定，否则超时并停止。
 
-任务表的 `arm-calibrate` 读取四轴当前位置作为软件基准，并复用夹爪 TTL 串口给工具舵机 ID1 下发固定位置、使能扭矩。固定位置由 `SERVO['fixed_positions'][1]` 配置；正常退出保留该舵机的扭矩与目标，显式 `arm-disable` 则关闭工具舵机和夹爪的扭矩。单独调用 `arm.calibrate()` 和角度调试仍只建立软件基准；需要同时固定 ID1 时调用 `arm.calibrate(hold_tool=True)`。初始逻辑角为 `0 0 160 24`；`home()` 等待回到本次初始姿态并连续到位。夹爪 ID2，张开 291°、闭合 243°，夹持时等待到位或实际朝目标运动后停稳，退出不自动松开物体。
+任务表的 `arm-calibrate` 读取四轴当前位置作为软件基准，并复用夹爪 TTL 串口给工具舵机 ID1 下发固定角度、使能扭矩。角度在 `config.py` 的 `SERVO['fixed_angles_deg'][1]` 设置，单位为度，与 `debug/angles.py` 的舵机角度一致；例如 `164.0` 表示 164°，自动换算为编码器位置 1866。原 `fixed_positions` 配置已改为 `fixed_angles_deg`，无需手动换算编码器值。初始化必须确认 ID1 到位并连续停稳后才打印校准成功；超时、过载、通信错误或等待期间取消时，尝试失能 ID1 并停止任务，保留夹爪 ID2 的状态。到位超时、容差和停稳时间使用 `SERVO` 的 `move_timeout`、`arrival_tolerance`、`settle_seconds`。正常退出保留 ID1 的扭矩与目标，显式 `arm-disable` 则关闭工具舵机和夹爪的扭矩。单独调用 `arm.calibrate()` 和角度调试仍只建立软件基准；需要同时固定 ID1 时调用 `arm.calibrate(hold_tool=True)`。初始逻辑角为 `0 0 160 24`；`home()` 等待回到本次初始姿态并连续到位。夹爪 ID2 的张开、闭合角度分别在 `ARM['gripper_open_angle_deg']`、`ARM['gripper_close_angle_deg']` 设置，夹持时等待到位或实际朝目标运动后停稳，退出不自动松开物体。
 
 任务表的 `arm-move`、`arm-home`、`home` 默认阻塞执行：四轴编码器误差均在 ±5° 内，并连续保持 0.2 秒才执行下一条指令；单次运动最多等待 30 秒。默认角度容差恢复旧版的 5°，允许例如 ID2 目标 0°、实际 −3.03° 时继续任务；该设置只改变完成判定，不消除实际位置偏差。如需更高精度，可降低 `ARM['arrival_tolerance_deg']`，但超出容差的偏差仍会导致超时。`ARM['arrival_speed_rpm']` 默认为 `None`，不以速度反馈作为完成门槛，避免已经到位却因位置保持时的非零速度反馈一直等待；如需同时检查转速，可设为正数，例如 `0.5` 表示各轴转速绝对值均须 ≤0.5 rpm。连续角度到位不代表瞬时速度必为零，运动完成后电机仍保持位置目标。超时报告各轴目标、实际角度、速度和当前到位条件并尝试失能四轴，任务不会继续。参数在 `ARM` 的 `arrival_tolerance_deg`、`arrival_speed_rpm`、`arrival_settle_seconds`、`move_timeout` 调整。自动调用的抓物体段继续沿用主线零点。任务间隔由 `STEP_GAP` 配置。
 

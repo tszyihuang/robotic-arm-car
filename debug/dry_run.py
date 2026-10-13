@@ -53,10 +53,10 @@ class DryArm:
 
     def calibrate(self, *, hold_tool=False):
         if hold_tool:
-            position = SERVO['fixed_positions'][1]
-            angle = position * 360 / 4095
+            angle = SERVO['fixed_angles_deg'][1]
+            position = round(angle * 4095 / 360)
             print(f"arm.calibrate(hold_tool=True)  # 读取四轴软件基准，"
-                  f"舵机 ID1 使能并保持位置 {position}（{angle:.2f}°）")
+                  f"舵机 ID1 使能并保持 {angle:.2f}°（位置 {position}），实机等待到位，失败自动失能")
         else:
             print("arm.calibrate()  # 读取软件基准，不运动")
 

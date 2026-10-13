@@ -82,8 +82,8 @@ VISION_CONTROL = {
     "E_DEAD": 0.0, "RATE_SRC": "gap", "GAP_WINDOW": 0.08, "GAP_TAU": 0.05,
     "LOST_STOP": 0.6, "MAX_DEV": 45.0, "TRACK_WAIT": 0.5,  # 直走视觉过期后切换 gap；align 仍停车。
     "GAP_RECOVERY_FRAMES": 2,  # gap 盲走期间，连续有效新帧达到此数量后恢复视觉纠偏。
-    "KP_YAW": 10.0, "KI_YAW": 0.5, "YAW_W_MAX": 40.0,
-    "KP_RATE": 10.0, "KI_RATE": 0.5, "KFF": 1.0, "KD_RATE": 0.0,
+    "KP_YAW": 10.0, "KI_YAW": 1, "YAW_W_MAX": 40.0,
+    "KP_RATE": 10.0, "KI_RATE": 1, "KFF": 1.0, "KD_RATE": 0.0,
     "TRIM_MAX": 100.0, "MIN_CONF": 0.0, "dir_sign": 1.0,
     "GAP_FINISH_Y_RATIO": 0.15,  # 两侧完整线段均在 y ≥ 此比例 × 原图高度时，关闭本趟视觉纠偏；0 关闭判断。
     "GAP_FINISH_MM": 0.0,  # 可选的剩余距离切换：0 关闭；正值 = 最后这段距离只用 gap 保持航向。
@@ -121,7 +121,7 @@ SERVO = {
     "default_id": 1, "baudrate": 1000000, "speed": 1000, "timeout": 0.1,
     "write_timeout": 1.0,
     "move_timeout": 8.0, "arrival_tolerance": 6, "settle_seconds": 0.2,
-    "fixed_positions": {1: 164},  # 仅作为 arm-calibrate 的目标位置，不限制后续运动。
+    "fixed_angles_deg": {1: 166.0},  # arm-calibrate 的保持角度（°），与 debug/angles.py 的舵机角度一致。
     "probe_baudrates": (1000000, 115200, 500000, 250000, 128000, 76800, 57600, 38400),
 }
 
